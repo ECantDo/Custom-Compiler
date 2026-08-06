@@ -1,0 +1,11 @@
+[package]
+name = "cpu-simulator-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+once_cell = "1"
+
+[[bin]]
+name = "build_to_schematic"
+path = "src/main.rs"
