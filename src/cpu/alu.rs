@@ -1,17 +1,25 @@
-use crate::cpu::{Long, UnsignedWord, Word};
+use crate::cpu::{UnsignedWord, Word};
 
 #[derive(Copy, Clone)]
-struct CpuFlags {
+pub struct CpuFlags {
 	carry_flag: bool,
 	is_zero: bool,
+	overflow_flag: bool, // signed overflow; used with sign_flag to resolve signed vs unsigned branches
+	sign_flag: bool, // top bit of the result; alone it's not enough for signed compares (see overflow_flag)
+}
+
+impl Default for CpuFlags {
+	fn default() -> Self {
+		Self { carry_flag: false, is_zero: false, overflow_flag: false, sign_flag: false }
+	}
 }
 
 /*
-    Opcode: 8 bits:
-    0bUUUIMMMM
-    U -> Upper code; specific instruction for the ALU
-    I -> Immediate flag; is this instruction using an immediate value?
-    M -> Main code; what part of the CPU is being used ... i.e. main ALU vs barrel shifter
+ * Opcode: 8 bits:
+ * 0bUUUIMMMM
+ * U -> Upper code; specific instruction for the ALU
+ * I -> Immediate flag; is this instruction using an immediate value?
+ * M -> Main code; what part of the CPU is being used ... i.e. main ALU vs barrel shifter
 */
 const MAIN_OP_MASK: u8 = 0x0F; // first 4 bits of the opcode
 const IS_IMM_MASK: u8 = 0x10; // the fifth bit
@@ -49,8 +57,6 @@ fn run_alu_operation(opcode: u8, input_a: Word, input_b: Word, flags: &mut CpuFl
 // ALU Operations
 // =================================================================================================
 
-const WORD_MASK: Long = UnsignedWord::MAX as Long; // Should be 0x0000FFFF
-
 trait AluOperation {
 	fn operation(input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word;
 }
@@ -58,12 +64,15 @@ trait AluOperation {
 struct AluAdd;
 impl AluOperation for AluAdd {
 	fn operation(input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word {
-		let mut result: Long = input_a as Long + input_b as Long;
-		flags.carry_flag = (result & !WORD_MASK) != 0;
-		result &= WORD_MASK;
-		flags.is_zero = result == 0;
+		let (result, overflowed) = input_a.overflowing_add(input_b);
+		flags.overflow_flag = overflowed;
 
-		result as Word
+		let (_, carried) = (input_a as UnsignedWord).overflowing_add(input_b as UnsignedWord);
+		flags.carry_flag = carried;
+
+		flags.is_zero = result == 0;
+		flags.sign_flag = result < 0;
+		result
 	}
 }
 
@@ -71,11 +80,15 @@ impl AluOperation for AluAdd {
 struct AluSub;
 impl AluOperation for AluSub {
 	fn operation(input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word {
-		let mut result: Long = (input_a as Long).wrapping_sub(input_b as Long);
-		flags.carry_flag = (result & !WORD_MASK) != 0; // borrow, if you're treating carry_flag as "borrow out" for SUB
-		result &= WORD_MASK;
+		let (result, overflowed) = input_a.overflowing_sub(input_b);
+		flags.overflow_flag = overflowed;
+
+		let (_, borrowed) = (input_a as UnsignedWord).overflowing_sub(input_b as UnsignedWord);
+		flags.carry_flag = borrowed; // borrow-out, if you're treating carry_flag as "borrow" for SUB
+
 		flags.is_zero = result == 0;
-		result as Word
+		flags.sign_flag = result < 0;
+		result
 	}
 }
 
@@ -85,6 +98,8 @@ impl AluOperation for AluXor {
 		let result = input_a ^ input_b;
 		flags.is_zero = result == 0;
 		flags.carry_flag = false;
+		flags.overflow_flag = false;
+		flags.sign_flag = result < 0;
 		result
 	}
 }
@@ -95,6 +110,8 @@ impl AluOperation for AluOr {
 		let result = input_a | input_b;
 		flags.is_zero = result == 0;
 		flags.carry_flag = false;
+		flags.overflow_flag = false;
+		flags.sign_flag = result < 0;
 		result
 	}
 }
@@ -105,6 +122,8 @@ impl AluOperation for AluAnd {
 		let result = input_a & input_b;
 		flags.is_zero = result == 0;
 		flags.carry_flag = false;
+		flags.overflow_flag = false;
+		flags.sign_flag = result < 0;
 		result
 	}
 }
@@ -115,6 +134,8 @@ impl AluOperation for AluXnor {
 		let result = !(input_a ^ input_b);
 		flags.is_zero = result == 0;
 		flags.carry_flag = false;
+		flags.overflow_flag = false;
+		flags.sign_flag = result < 0;
 		result
 	}
 }
@@ -125,6 +146,8 @@ impl AluOperation for AluNor {
 		let result = !(input_a | input_b);
 		flags.is_zero = result == 0;
 		flags.carry_flag = false;
+		flags.overflow_flag = false;
+		flags.sign_flag = result < 0;
 		result
 	}
 }
@@ -135,6 +158,8 @@ impl AluOperation for AluNand {
 		let result = !(input_a & input_b);
 		flags.is_zero = result == 0;
 		flags.carry_flag = false;
+		flags.overflow_flag = false;
+		flags.sign_flag = result < 0;
 		result
 	}
 }
@@ -142,47 +167,47 @@ impl AluOperation for AluNand {
 struct AluShiftLeftLogical;
 impl AluOperation for AluShiftLeftLogical {
 	fn operation(input_a: Word, input_b: Word, _flags: &mut CpuFlags) -> Word {
-		let shift = (input_b & 0xF) as Long;
-		let result = ((input_a as Long) << shift) & WORD_MASK;
-		result as Word
+		let shift = input_b & 0xF;
+		input_a << shift
 	}
 }
 
 struct AluShiftRightArithmetic;
 impl AluOperation for AluShiftRightArithmetic {
 	fn operation(input_a: Word, input_b: Word, _flags: &mut CpuFlags) -> Word {
-		let shift = (input_b & 0xF) as Long;
-		// Sign-extend input_a to a signed type before shifting so the sign bit propagates
-		let result = ((input_a as i16 as Long) >> shift) & WORD_MASK;
-		result as Word
+		let shift = input_b & 0xF;
+		// Word is signed (i16), so >> is already arithmetic (sign-extending)
+		input_a >> shift
 	}
 }
 
 struct AluShiftRightLogical;
 impl AluOperation for AluShiftRightLogical {
 	fn operation(input_a: Word, input_b: Word, _flags: &mut CpuFlags) -> Word {
-		let shift = (input_b & 0xF) as Long;
-		let result = ((input_a as Long) >> shift) & WORD_MASK;
-		result as Word
+		let shift = (input_b & 0xF) as UnsignedWord;
+		// Reinterpret as UnsignedWord so >> zero-fills (logical) instead of sign-extending
+		((input_a as UnsignedWord) >> shift) as Word
 	}
 }
 
 struct AluAddWithFlags;
 impl AluOperation for AluAddWithFlags {
 	fn operation(input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word {
-		let cin: Long = if flags.carry_flag { 1 } else { 0 };
-		let mut result: Long = input_a as Long + input_b as Long + cin;
-		flags.carry_flag = (result & !WORD_MASK) != 0;
-		result &= WORD_MASK;
-		flags.is_zero = result == 0;
-		result as Word
-	}
-}
-// =================================================================================================
-// Testing
-// =================================================================================================
+		let cin_unsigned: UnsignedWord = if flags.carry_flag { 1 } else { 0 };
+		let cin_signed: Word = cin_unsigned as Word;
 
-#[test]
-fn test() {
-	debug_assert!(WORD_MASK == 0xffff);
+		// Chain two overflowing_adds since a 3-operand add has no single builtin;
+		// carry-out is true if either step carried.
+		let (partial_u, carry1) = (input_a as UnsignedWord).overflowing_add(input_b as UnsignedWord);
+		let (_result_u, carry2) = partial_u.overflowing_add(cin_unsigned);
+		flags.carry_flag = carry1 || carry2;
+
+		let (partial_s, overflow1) = input_a.overflowing_add(input_b);
+		let (result, overflow2) = partial_s.overflowing_add(cin_signed);
+		flags.overflow_flag = overflow1 || overflow2;
+
+		flags.is_zero = result == 0;
+		flags.sign_flag = result < 0;
+		result
+	}
 }
