@@ -1,4 +1,4 @@
-use crate::cpu::{Instruction, ROM_SIZE};
+use crate::cpu::{Instruction, UnsignedWord, ROM_SIZE};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 
@@ -62,7 +62,8 @@ impl ProgramMemory {
 		Ok(Self::from_program(&program))
 	}
 
-	pub fn fetch(&self, address: usize) -> Instruction {
+	pub fn fetch(&self, address: UnsignedWord) -> Instruction {
+		let address = address as usize;
 		assert!(address < ROM_SIZE);
 		self.program_memory[address]
 	}
