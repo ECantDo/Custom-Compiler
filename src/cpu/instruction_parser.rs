@@ -56,7 +56,8 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 
 	// let upper_opcode = (ii.opcode & UPPER_OP_MASK) >> 5; // top 3-bits of the opcode
 	let main_opcode = ii.opcode & MAIN_OP_MASK; // first 4-bits of the opcode
-	let is_imm = ii.opcode & IS_IMM_MASK != 0;
+	let is_imm = ii.opcode & IS_IMM_MASK != 0 ||
+		(main_opcode == OPCODE_MAP.get("str").unwrap().1 as u8 & MAIN_OP_MASK);
 
 	let has_rd_reg = main_opcode != OPCODE_MAP.get("beq").unwrap().1 as u8 & MAIN_OP_MASK;
 
@@ -117,16 +118,19 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 
 #[test]
 fn test() {
-	use crate::assembler::{build::assemble, operations::registers::get_register_value};
+	use crate::assembler::{build::{assemble, format_file}, operations::registers::get_register_value};
 	use std::collections::HashMap;
 
 	let labels: HashMap<String, i32> = HashMap::new();
 
-	let program: Vec<String> = vec![
+	let raw_program: Vec<String> = vec![
 		String::from("add s0 s1 t0"),
 		String::from("addi s2 1 s2"),
 		String::from("bltu s0 s3 -10"),
+		String::from("str s0 4(s2)"),
 	];
+
+	let program = format_file(&raw_program);
 
 	let expected_results: Vec<InstructionInfo> = vec![
 		InstructionInfo {
@@ -149,13 +153,20 @@ fn test() {
 			reg2: get_register_value("s3") as u8,
 			immediate: -10,
 			write_back_reg: 0
+		},
+		InstructionInfo {
+			opcode: OPCODE_MAP.get("str").unwrap().1 as u8,
+			reg1: get_register_value("s0") as u8,
+			write_back_reg: get_register_value("s2") as u8,
+			immediate: 4,
+			reg2: 0,
 		}
 	];
 
 	let assembled_program: Vec<u32> = assemble(&program, &labels).unwrap();
 	let parsed_program: Vec<InstructionInfo> = assembled_program.iter().copied().map(parse).collect();
 
-	for (idx, parsed) in parsed_program.iter().enumerate(){
+	for (idx, parsed) in parsed_program.iter().enumerate() {
 		assert_eq!(*parsed, expected_results[idx]);
 	}
 }

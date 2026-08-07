@@ -324,7 +324,7 @@ fn replace_constants(file_contents: &mut [String], constants: &HashMap<String, i
 
 /// Port of `Build.formatFile`. Strips `//` comments, strips parentheses,
 /// and collapses runs of whitespace into single spaces.
-fn format_file(file_contents: &[String]) -> Vec<String> {
+pub fn format_file(file_contents: &[String]) -> Vec<String> {
     file_contents
         .iter()
         .map(|line| {
