@@ -82,8 +82,14 @@ fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Result<V
         }
 
         let mut parts: Vec<String> = line.split(' ').map(|s| s.to_string()).collect();
+        let provided_args = parts.len().saturating_sub(1);
 
-        if pseudo_opcodes::operation_exists(&parts[0]) {
+        // A mnemonic existing in the pseudo table isn't enough on its own -
+        // "jal" is both a pseudo op (1 operand: `jal offset`) and a real
+        // opcode (2 operands: `jal rd, offset`). Only expand as a pseudo
+        // op when the operand count actually matches; otherwise let it
+        // fall through to the real opcode below.
+        if pseudo_opcodes::expected_arg_count(&parts[0]) == Some(provided_args) {
             let converted = pseudo_opcodes::convert(line)?;
             parts = converted.split(' ').map(|s| s.to_string()).collect();
         }
@@ -190,9 +196,9 @@ fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Result<V
                 // Imm bits starts 3rd bit into byte 3
                 operation_value |= (immediate_value & 0x3FFF) << 18;
 
-                if operation_value >> 5 == 0 {
+                if instruction_values[0] >> 5 == 0 {
                     // in: rd -> bit 0 of byte 2
-                    operation_value |= (instruction_values[2] & 0x1F) << 8;
+                    operation_value |= (instruction_values[1] & 0x1F) << 8;
                 } else {
                     // out: rs1 -> bit 5 of byte 2
                     operation_value |= (instruction_values[1] & 0x1F) << 13;

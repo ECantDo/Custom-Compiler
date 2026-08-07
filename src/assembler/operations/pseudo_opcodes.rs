@@ -45,8 +45,8 @@ static CONVERSION_MAP: Lazy<HashMap<&'static str, &'static [&'static str]>> = La
         ("ble", ["rs", "rt", "imm"].as_slice()),
         ("bgtu", ["rs", "rt", "imm"].as_slice()),
         ("bleu", ["rs", "rt", "imm"].as_slice()),
-        ("j", ["imm"].as_slice()),
-        ("jal", ["imm"].as_slice()),
+        ("j", ["offset"].as_slice()),
+        ("jal", ["offset"].as_slice()),
         ("ret", [].as_slice()),
     ])
 });
@@ -86,4 +86,10 @@ pub fn convert(line: &str) -> Result<String, AssemblerError> {
 
 pub fn operation_exists(operation: &str) -> bool {
     OPCODE_MAP.contains_key(operation.to_lowercase().as_str())
+}
+
+/// Number of operands the pseudo-opcode `operation` expects, or `None` if
+/// it isn't a pseudo opcode at all.
+pub fn expected_arg_count(operation: &str) -> Option<usize> {
+    CONVERSION_MAP.get(operation.to_lowercase().as_str()).map(|parts| parts.len())
 }

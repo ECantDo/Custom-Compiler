@@ -88,7 +88,7 @@ static IMMEDIATE_MAP: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| {
         ("jalr", 0b0100),
         ("lod", 0b0100),
         ("str", 0b0100),
-        ("in", 0b010),
+        ("in", 0b100), // in rd, port  (matches out's argument order: register first, port second)
         ("out", 0b100),
     ])
 });
