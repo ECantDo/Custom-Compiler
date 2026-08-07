@@ -27,9 +27,29 @@ impl ProgramMemory {
 		memory
 	}
 
+	/// Takes in any file (with a type) and loads it, uses the `.bin` or `.abin` file types seen
+	/// below
+	pub fn read_from_file(file_name: &str) -> io::Result<Self> {
+		let file_type_idx = file_name.rfind('.').unwrap_or(0);
+
+		if file_type_idx == 0 {
+			panic!("No filetype found or no filename found: {}", file_name);
+		}
+
+		let file_extension = &file_name[file_type_idx..];
+		let file = &file_name[..file_type_idx];
+
+		match file_extension {
+			".bin" => { Self::read_from_bin_file(file) }
+			".abin" => { Self::read_from_ascii_file(file) }
+			_ => { panic!("Unrecognized filetype: {}", file_extension) }
+		}
+	}
+
+
 	/// Reads a `.bin` file (raw little-endian 4-byte instructions, no separators)
 	/// and builds a ProgramMemory from it.
-	pub fn read_from_file(file: &str) -> io::Result<Self> {
+	pub fn read_from_bin_file(file: &str) -> io::Result<Self> {
 		let program = read_pure_binary(file)?;
 		Ok(Self::from_program(&program))
 	}
