@@ -48,7 +48,11 @@ pub fn run_alu_operation(opcode: u8, input_a: Word, input_b: Word, flags: &mut C
 			2 => AluShiftRightLogical::operation(input_a, input_b, flags),
 			_ => 0,
 		},
-		MAIN_OP_ADDF => AluAddWithFlags::operation(input_a, input_b, flags),
+		MAIN_OP_ADDF => match (opcode & UPPER_OP_MASK) >> 5 {
+			0 => AluAddWithFlags::operation(input_a, input_b, flags),
+			1 => AluSubWithBorrow::operation(input_a, input_b, flags),
+			_ => 0,
+		}
 		_ => 0,
 	}
 }
@@ -204,6 +208,25 @@ impl AluOperation for AluAddWithFlags {
 
 		let (partial_s, overflow1) = input_a.overflowing_add(input_b);
 		let (result, overflow2) = partial_s.overflowing_add(cin_signed);
+		flags.overflow_flag = overflow1 || overflow2;
+
+		flags.is_zero = result == 0;
+		flags.sign_flag = result < 0;
+		result
+	}
+}
+
+struct AluSubWithBorrow;
+impl AluOperation for AluSubWithBorrow {
+	fn operation(input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word {
+		let borrow_in: UnsignedWord = if flags.carry_flag { 1 } else { 0 };
+
+		let (partial_u, borrow1) = (input_a as UnsignedWord).overflowing_sub(input_b as UnsignedWord);
+		let (_, borrow2) = partial_u.overflowing_sub(borrow_in);
+		flags.carry_flag = borrow1 || borrow2;
+
+		let (partial_s, overflow1) = input_a.overflowing_sub(input_b);
+		let (result, overflow2) = partial_s.overflowing_sub(borrow_in as Word);
 		flags.overflow_flag = overflow1 || overflow2;
 
 		flags.is_zero = result == 0;

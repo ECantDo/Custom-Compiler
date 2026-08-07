@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use cpu_simulator_rs::assembler::build;
+use cpu_simulator_rs::cpu::start_cpu_from_program;
 
 /// Port of `Assembler.BuildToSchematic.main`.
 ///
@@ -34,6 +35,8 @@ fn main() {
 		eprintln!("Failed to write ascii binary output: {e}");
 		std::process::exit(1);
 	}
+
+	start_cpu_from_program(&program);
 
     // Build::runBuildToSchem(file_name + ".bin");
 }

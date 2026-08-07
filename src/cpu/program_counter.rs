@@ -1,4 +1,4 @@
-use crate::cpu::UnsignedWord;
+use crate::cpu::{Long, UnsignedWord, Word};
 
 pub struct ProgramCounter {
 	location: usize,
@@ -7,6 +7,14 @@ pub struct ProgramCounter {
 impl ProgramCounter {
 	pub fn set(&mut self, value: UnsignedWord) {
 		self.location = value as usize;
+	}
+	
+	pub fn add(&mut self, value: Word) {
+		let new_loc = self.location as Long + value as Long;
+		if new_loc < 0 {
+			panic!("New location for PC is less than 0")
+		}
+		self.location = new_loc as usize;
 	}
 
 	pub fn increment(&mut self) {

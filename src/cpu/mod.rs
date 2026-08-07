@@ -1,4 +1,5 @@
-use crate::cpu::alu::CpuFlags;
+use crate::cpu::alu::{run_alu_operation, CpuFlags, UPPER_OP_MASK};
+use crate::cpu::instruction_parser::{parse_instruction, InstructionInfo};
 use crate::cpu::io::IoPorts;
 use crate::cpu::program_counter::ProgramCounter;
 use crate::cpu::program_ram::ProgramRam;
@@ -46,6 +47,113 @@ impl Default for CpuParts {
 	}
 }
 
+pub fn start_cpu_from_file(file_name: &str) {
+	let mut parts = CpuParts::default();
+	parts.program_memory = ProgramMemory::read_from_file(file_name).unwrap();
+	cpu_cycle(&mut parts);
+}
+
+pub fn start_cpu_from_program(program: &[u32]) {
+	let mut parts = CpuParts::default();
+	parts.program_memory = ProgramMemory::from_program(program);
+	cpu_cycle(&mut parts);
+}
+
 fn cpu_cycle(cpu_parts: &mut CpuParts) {
-	let instruction: Instruction = cpu_parts.program_memory.fetch(cpu_parts.program_counter.get());
+	println!("Program Started");
+	let mut running = true;
+
+	while running {
+		// let cycle_start = Instant::now();
+		let instruction: Instruction = cpu_parts.program_memory.fetch(cpu_parts.program_counter.get());
+		cpu_parts.program_counter.increment();
+
+		let info: InstructionInfo = parse_instruction(instruction);
+
+		if info.opcode == 0 {
+			running = false;
+			continue;
+		}
+
+		match info.opcode & !UPPER_OP_MASK{
+			1 | 2 | 3 => {
+				// ALU, shifter, ADDF
+				let val1 = cpu_parts.registers.get(info.reg1);
+				let val2 = cpu_parts.registers.get(info.reg2);
+
+				let result = run_alu_operation(info.opcode, val1, val2, &mut cpu_parts.cpu_flags);
+				cpu_parts.registers.set(info.write_back_reg, result);
+			}
+			17 | 18 => {
+				// ALU, shifter => with imm
+				let val1 = cpu_parts.registers.get(info.reg1);
+
+				let result = run_alu_operation(info.opcode, val1, info.immediate, &mut cpu_parts.cpu_flags);
+				cpu_parts.registers.set(info.write_back_reg, result);
+			}
+			4 => {
+				// Branch
+				// Perform math
+				let val1 = cpu_parts.registers.get(info.reg1);
+				let val2 = cpu_parts.registers.get(info.reg2);
+
+				run_alu_operation(info.opcode, val1, val2, &mut cpu_parts.cpu_flags);
+
+				if branch_taken((info.opcode & UPPER_OP_MASK) >> 5, &cpu_parts.cpu_flags) {
+					cpu_parts.program_counter.add(info.immediate);
+				}
+			}
+			25 => {
+				cpu_parts.registers.set(info.write_back_reg, info.immediate);
+			}
+			7 => {
+				let addr = cpu_parts.registers.get(info.reg1) + info.immediate;
+				if (info.opcode & UPPER_OP_MASK) >> 5 == 0 {
+					// str
+					let value = cpu_parts.registers.get(info.write_back_reg); // This seems dumb
+					cpu_parts.program_ram.set(addr as UnsignedWord, value);
+				} else {
+					// lod
+					cpu_parts.registers.set(info.write_back_reg,
+					                        cpu_parts.program_ram.get(addr as UnsignedWord));
+				}
+			}
+			5 => {
+				cpu_parts.registers.set(info.write_back_reg, cpu_parts.program_counter.get() as Word);
+				cpu_parts.program_counter.set(info.immediate as UnsignedWord);
+			}
+			6 => {
+				cpu_parts.registers.set(info.write_back_reg, cpu_parts.program_counter.get() as Word);
+				cpu_parts.program_counter.set(
+					(info.immediate + cpu_parts.registers.get(info.reg1)) as UnsignedWord
+				);
+			}
+			8 => {
+				let port = info.immediate as UnsignedWord;
+				if info.opcode >> 5 == 0 {
+					let val_in = cpu_parts.io_ports.input(port);
+					cpu_parts.registers.set(info.write_back_reg, val_in);
+				} else {
+					cpu_parts.io_ports.output(
+						cpu_parts.registers.get(info.reg1) as UnsignedWord, port,
+					);
+				}
+			}
+			_ => {
+				panic!("Unknown function -> {}", info.opcode);
+			}
+		}
+	}
+}
+
+fn branch_taken(condition: u8, flags: &CpuFlags) -> bool {
+	match condition {
+		0 => flags.is_zero,                              // BEQ:  a - b == 0
+		1 => !flags.is_zero,                              // BNE:  a - b != 0
+		2 => flags.sign_flag != flags.overflow_flag,      // BLT:  signed a < b
+		3 => flags.sign_flag == flags.overflow_flag,      // BGE:  signed a >= b
+		4 => flags.carry_flag,                            // BLTU: unsigned a < b (borrow occurred)
+		5 => !flags.carry_flag,                           // BGEU: unsigned a >= b (no borrow)
+		_ => false,
+	}
 }

@@ -15,7 +15,7 @@ impl Default for ProgramMemory {
 }
 
 impl ProgramMemory {
-	pub fn from_program(program: &[i32]) -> Self {
+	pub fn from_program(program: &[u32]) -> Self {
 		let mut memory = Self::default();
 		for (i, &instruction) in program.iter().enumerate() {
 			if i >= ROM_SIZE {
@@ -50,7 +50,7 @@ impl ProgramMemory {
 	/// Reads a `.bin` file (raw little-endian 4-byte instructions, no separators)
 	/// and builds a ProgramMemory from it.
 	pub fn read_from_bin_file(file: &str) -> io::Result<Self> {
-		let program = read_pure_binary(file)?;
+		let program: Vec<u32> = read_pure_binary(file)?;
 		Ok(Self::from_program(&program))
 	}
 
@@ -69,7 +69,7 @@ impl ProgramMemory {
 	}
 }
 
-fn read_pure_binary(file: &str) -> io::Result<Vec<i32>> {
+fn read_pure_binary(file: &str) -> io::Result<Vec<u32>> {
 	let path = format!("{file}.bin");
 	let mut reader = BufReader::new(File::open(path)?);
 
@@ -85,13 +85,13 @@ fn read_pure_binary(file: &str) -> io::Result<Vec<i32>> {
 
 	let program = bytes
 		.chunks_exact(4)
-		.map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+		.map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
 		.collect();
 
 	Ok(program)
 }
 
-fn read_ascii_binary(file: &str) -> io::Result<Vec<i32>> {
+fn read_ascii_binary(file: &str) -> io::Result<Vec<u32>> {
 	let path = format!("{file}.abin");
 	let reader = BufReader::new(File::open(path)?);
 
@@ -104,7 +104,7 @@ fn read_ascii_binary(file: &str) -> io::Result<Vec<i32>> {
 		}
 		let value = u32::from_str_radix(bits, 2)
 			.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-		program.push(value as i32);
+		program.push(value);
 	}
 
 	Ok(program)
