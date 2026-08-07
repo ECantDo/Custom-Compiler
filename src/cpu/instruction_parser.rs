@@ -1,5 +1,5 @@
 use crate::assembler::operations::opcodes::OPCODE_MAP;
-use crate::cpu::alu::{IS_IMM_MASK, MAIN_OP_MASK, UPPER_OP_MASK};
+use crate::cpu::alu::{IS_IMM_MASK, MAIN_OP_MASK};
 use crate::cpu::{Instruction, Word};
 
 #[derive(Default, PartialEq, Debug)]
@@ -37,6 +37,8 @@ const SMALL_IMM_SHIFT: Instruction = STAND_IMM_SHIFT;
 // Misc
 const LI_IMM_UPPER_MASK: Instruction = 0x00030000;
 const LI_IMM_UPPER_SHIFT: Instruction = 2;
+
+const IMM_SIGN_EXTEND_MASK: Word = 0x2000;
 //@formatter:on
 
 pub fn parse(instruction: Instruction) -> InstructionInfo {
@@ -52,7 +54,7 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 
 	ii.opcode = (instruction & 0xff) as u8; // first 8-bits in the inst
 
-	let upper_opcode = (ii.opcode & UPPER_OP_MASK) >> 5; // top 3-bits of the opcode
+	// let upper_opcode = (ii.opcode & UPPER_OP_MASK) >> 5; // top 3-bits of the opcode
 	let main_opcode = ii.opcode & MAIN_OP_MASK; // first 4-bits of the opcode
 	let is_imm = ii.opcode & IS_IMM_MASK != 0;
 
@@ -106,6 +108,10 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 		ii.immediate = ((instruction & SMALL_IMM_MASK) >> STAND_IMM_SHIFT) as Word;
 	}
 
+	if (is_imm || !has_rd_reg) && (ii.immediate & IMM_SIGN_EXTEND_MASK != 0) {
+		ii.immediate |= 0xC000u16 as i16;
+	}
+
 	ii
 }
 
@@ -146,8 +152,10 @@ fn test() {
 		}
 	];
 
-	let assembled_program:Vec<u32> = assemble(&program, &labels).unwrap();
+	let assembled_program: Vec<u32> = assemble(&program, &labels).unwrap();
 	let parsed_program: Vec<InstructionInfo> = assembled_program.iter().copied().map(parse).collect();
 
-	assert_eq!(parsed_program, expected_results);
+	for (idx, parsed) in parsed_program.iter().enumerate(){
+		assert_eq!(*parsed, expected_results[idx]);
+	}
 }
