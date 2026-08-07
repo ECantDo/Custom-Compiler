@@ -34,18 +34,18 @@ fn main() {
 }
 
 /// Port of `BuildToSchematic.writeToAsciiBinary`.
-fn write_to_ascii_binary(file: &str, program: &[i32]) -> std::io::Result<()> {
+fn write_to_ascii_binary(file: &str, program: &[u32]) -> std::io::Result<()> {
     let path = format!("{file}.abin");
     let mut writer = BufWriter::new(File::create(path)?);
 
     for &instruction in program {
-        writeln!(writer, "{:032b}", instruction as u32)?;
+        writeln!(writer, "{:032b}", instruction)?;
     }
 
     Ok(())
 }
 
-fn write_to_pure_binary(file: &str, program: &[i32]) -> std::io::Result<()> {
+fn write_to_pure_binary(file: &str, program: &[u32]) -> std::io::Result<()> {
     let path = format!("{file}.bin");
     let mut writer = BufWriter::new(File::create(path)?);
 

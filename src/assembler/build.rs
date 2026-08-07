@@ -32,7 +32,7 @@ pub fn run_build_to_schem(file_path: &str) {
 
 /// Port of `Build.build`. Reads a `.as` source file, assembles it, writes
 /// the `.bin` output next to it, and returns the assembled machine code.
-pub fn build(file_path: &str) -> Result<Vec<i32>, AssemblerError> {
+pub fn build(file_path: &str) -> Result<Vec<u32>, AssemblerError> {
     let raw_contents = read_file(file_path)?;
     let file_contents = format_file(&raw_contents);
     let labels = get_labels(&file_contents);
@@ -67,10 +67,10 @@ pub fn build(file_path: &str) -> Result<Vec<i32>, AssemblerError> {
 /// instruction; see the inline comments in the Java source for what each
 /// case in the switch/match represents (opcode encoding by instruction
 /// class).
-fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Result<Vec<i32>, AssemblerError> {
+pub fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Result<Vec<u32>, AssemblerError> {
     println!("{labels:?}");
 
-    let mut instructions: Vec<i32> = Vec::new();
+    let mut instructions: Vec<u32> = Vec::new();
     let mut line_number: i32 = 0;
 
     for line in file_contents {
@@ -211,7 +211,7 @@ fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Result<V
             }
         }
 
-        instructions.push(operation_value);
+        instructions.push(operation_value as u32);
         line_number += 1;
     }
 
@@ -242,7 +242,7 @@ pub fn parse_int(s: &str) -> Result<i32, AssemblerError> {
 
 /// Port of `Build.getLabels`.
 fn get_labels(file_contents: &[String]) -> HashMap<String, i32> {
-    let mut labels = HashMap::new();
+    let mut labels: HashMap<String, i32> = HashMap::new();
     let mut address: i32 = 0;
 
     for line in file_contents {
