@@ -2,10 +2,10 @@ use crate::cpu::{UnsignedWord, Word};
 
 #[derive(Copy, Clone)]
 pub struct CpuFlags {
-	carry_flag: bool,
-	is_zero: bool,
-	overflow_flag: bool, // signed overflow; used with sign_flag to resolve signed vs unsigned branches
-	sign_flag: bool, // top bit of the result; alone it's not enough for signed compares (see overflow_flag)
+	pub carry_flag: bool,
+	pub is_zero: bool,
+	pub overflow_flag: bool, // signed overflow; used with sign_flag to resolve signed vs unsigned branches
+	pub sign_flag: bool, // top bit of the result; alone it's not enough for signed compares (see overflow_flag)
 }
 
 impl Default for CpuFlags {
@@ -29,7 +29,7 @@ const MAIN_OP_ALU: u8 = 0x01;
 const MAIN_OP_SHIFT: u8 = 0x02;
 const MAIN_OP_ADDF: u8 = 0x03;
 
-fn run_alu_operation(opcode: u8, input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word {
+pub fn run_alu_operation(opcode: u8, input_a: Word, input_b: Word, flags: &mut CpuFlags) -> Word {
 	match opcode & MAIN_OP_MASK {
 		MAIN_OP_ALU => match (opcode & UPPER_OP_MASK) >> 5 {
 			0 => AluAdd::operation(input_a, input_b, flags),

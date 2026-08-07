@@ -26,9 +26,14 @@ fn main() {
     };
 
     if let Err(e) = write_to_pure_binary(file_name, &program) {
-        eprintln!("Failed to write ascii binary output: {e}");
+        eprintln!("Failed to write binary output: {e}");
         std::process::exit(1);
     }
+
+	if let Err(e) = write_to_ascii_binary(file_name, &program) {
+		eprintln!("Failed to write ascii binary output: {e}");
+		std::process::exit(1);
+	}
 
     // Build::runBuildToSchem(file_name + ".bin");
 }

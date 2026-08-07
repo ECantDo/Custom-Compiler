@@ -15,7 +15,7 @@ impl Default for ProgramMemory {
 }
 
 impl ProgramMemory {
-	fn from_program(program: &[i32]) -> Self {
+	pub fn from_program(program: &[i32]) -> Self {
 		let mut memory = Self::default();
 		for (i, &instruction) in program.iter().enumerate() {
 			if i >= ROM_SIZE {

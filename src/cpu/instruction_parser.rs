@@ -41,7 +41,7 @@ const LI_IMM_UPPER_SHIFT: Instruction = 2;
 const IMM_SIGN_EXTEND_MASK: Word = 0x2000;
 //@formatter:on
 
-pub fn parse(instruction: Instruction) -> InstructionInfo {
+pub fn parse_instruction(instruction: Instruction) -> InstructionInfo {
 	let mut ii = InstructionInfo::default();
 
 	// Hlt -> all 0 anyway, just return now
@@ -183,7 +183,7 @@ fn test() {
 	];
 
 	let assembled_program: Vec<u32> = assemble(&program, &labels).unwrap();
-	let parsed_program: Vec<InstructionInfo> = assembled_program.iter().copied().map(parse).collect();
+	let parsed_program: Vec<InstructionInfo> = assembled_program.iter().copied().map(parse_instruction).collect();
 
 	for (idx, parsed) in parsed_program.iter().enumerate() {
 		assert_eq!(*parsed, expected_results[idx], "Mismatch -> {}", raw_program[idx]);
