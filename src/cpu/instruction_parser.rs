@@ -1,10 +1,10 @@
 use crate::assembler::operations::opcodes::OPCODE_MAP;
 use crate::cpu::alu::{IS_IMM_MASK, MAIN_OP_MASK, UPPER_OP_MASK};
-use crate::cpu::{Instruction, UnsignedWord};
+use crate::cpu::{Instruction, Word};
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Debug)]
 pub struct InstructionInfo {
-	pub immediate: UnsignedWord,
+	pub immediate: Word,
 	pub opcode: u8,
 	pub write_back_reg: u8,
 	pub reg1: u8,
@@ -79,7 +79,7 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 		} else {
 			STAND_IMM_MASK
 		};
-		ii.immediate |= ((instruction & mask) >> STAND_IMM_SHIFT) as UnsignedWord;
+		ii.immediate |= ((instruction & mask) >> STAND_IMM_SHIFT) as Word;
 	}
 
 	if has_rs1 {
@@ -88,7 +88,7 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 		// Now has some imm value in here
 		// Be safe and don't do weird things -- use unsigned
 		// Puts the imm values into the top 2 bits, since that's where they need to go eventually
-		ii.immediate |= ((instruction & LI_IMM_UPPER_MASK) >> LI_IMM_UPPER_SHIFT) as UnsignedWord;
+		ii.immediate |= ((instruction & LI_IMM_UPPER_MASK) >> LI_IMM_UPPER_SHIFT) as Word;
 	}
 
 	if has_rs2 {
@@ -98,13 +98,56 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 	if has_rd_reg {
 		ii.write_back_reg = ((instruction & RD_REG_MASK) >> RD_REG_SHIFT) as u8;
 	} else {
-		ii.immediate |= ((instruction & LOWER_IMM_BRANCH_MASK) >> LOWER_IMM_BRANCH_SHIFT) as UnsignedWord;
-		ii.immediate |= ((instruction & UPPER_IMM_BRANCH_MASK) >> UPPER_IMM_BRANCH_SHIFT) as UnsignedWord;
+		ii.immediate |= ((instruction & LOWER_IMM_BRANCH_MASK) >> LOWER_IMM_BRANCH_SHIFT) as Word;
+		ii.immediate |= ((instruction & UPPER_IMM_BRANCH_MASK) >> UPPER_IMM_BRANCH_SHIFT) as Word;
 	}
 
 	if is_io {
-		ii.immediate = ((instruction & SMALL_IMM_MASK) >> STAND_IMM_SHIFT) as UnsignedWord;
+		ii.immediate = ((instruction & SMALL_IMM_MASK) >> STAND_IMM_SHIFT) as Word;
 	}
 
 	ii
+}
+
+#[test]
+fn test() {
+	use crate::assembler::{build::assemble, operations::registers::get_register_value};
+	use std::collections::HashMap;
+
+	let labels: HashMap<String, i32> = HashMap::new();
+
+	let program: Vec<String> = vec![
+		String::from("add s0 s1 t0"),
+		String::from("addi s2 1 s2"),
+		String::from("bltu s0 s3 -10"),
+	];
+
+	let expected_results: Vec<InstructionInfo> = vec![
+		InstructionInfo {
+			opcode: OPCODE_MAP.get("add").unwrap().1 as u8,
+			reg1: get_register_value("s0") as u8,
+			reg2: get_register_value("s1") as u8,
+			write_back_reg: get_register_value("t0") as u8,
+			immediate: 0,
+		},
+		InstructionInfo {
+			opcode: OPCODE_MAP.get("addi").unwrap().1 as u8,
+			reg1: get_register_value("s2") as u8,
+			immediate: 1,
+			write_back_reg: get_register_value("s2") as u8,
+			reg2: 0
+		},
+		InstructionInfo {
+			opcode: OPCODE_MAP.get("bltu").unwrap().1 as u8,
+			reg1: get_register_value("s0") as u8,
+			reg2: get_register_value("s3") as u8,
+			immediate: -10,
+			write_back_reg: 0
+		}
+	];
+
+	let assembled_program:Vec<u32> = assemble(&program, &labels).unwrap();
+	let parsed_program: Vec<InstructionInfo> = assembled_program.iter().copied().map(parse).collect();
+
+	assert_eq!(parsed_program, expected_results);
 }
