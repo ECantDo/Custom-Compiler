@@ -66,6 +66,9 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 	let has_rs1 = ii.opcode != OPCODE_MAP.get("li").unwrap().1 as u8
 		&& ii.opcode != OPCODE_MAP.get("jal").unwrap().1 as u8;
 
+	let is_full_imm = ii.opcode == OPCODE_MAP.get("li").unwrap().1 as u8
+		|| ii.opcode == OPCODE_MAP.get("jal").unwrap().1 as u8;
+
 	// If it is not an immediate, and it's not JAL, JALR, STR, LOD, IN, or OUT (`>= get('jal')`)
 	// as branching does have rs2 ... handily everything with a main op >= 5 doesn't have rs2
 	// I didn't even try to do that ... lol
@@ -109,7 +112,7 @@ pub fn parse(instruction: Instruction) -> InstructionInfo {
 		ii.immediate = ((instruction & SMALL_IMM_MASK) >> STAND_IMM_SHIFT) as Word;
 	}
 
-	if (is_imm || !has_rd_reg) && (ii.immediate & IMM_SIGN_EXTEND_MASK != 0) {
+	if (is_imm || !has_rd_reg) && (ii.immediate & IMM_SIGN_EXTEND_MASK != 0) && !is_full_imm {
 		ii.immediate |= 0xC000u16 as i16;
 	}
 
@@ -128,45 +131,61 @@ fn test() {
 		String::from("addi s2 1 s2"),
 		String::from("bltu s0 s3 -10"),
 		String::from("str s0 4(s2)"),
+		String::from("li 0x2000 s1"),
+		String::from("li -1 ra"),
 	];
 
 	let program = format_file(&raw_program);
 
 	let expected_results: Vec<InstructionInfo> = vec![
-		InstructionInfo {
+		InstructionInfo { // add s0 s1 t0
 			opcode: OPCODE_MAP.get("add").unwrap().1 as u8,
 			reg1: get_register_value("s0") as u8,
 			reg2: get_register_value("s1") as u8,
 			write_back_reg: get_register_value("t0") as u8,
 			immediate: 0,
 		},
-		InstructionInfo {
+		InstructionInfo { // addi s2 1 s2
 			opcode: OPCODE_MAP.get("addi").unwrap().1 as u8,
 			reg1: get_register_value("s2") as u8,
 			immediate: 1,
 			write_back_reg: get_register_value("s2") as u8,
 			reg2: 0
 		},
-		InstructionInfo {
+		InstructionInfo { // bltu s0 s3 -10
 			opcode: OPCODE_MAP.get("bltu").unwrap().1 as u8,
 			reg1: get_register_value("s0") as u8,
 			reg2: get_register_value("s3") as u8,
 			immediate: -10,
 			write_back_reg: 0
 		},
-		InstructionInfo {
+		InstructionInfo { // str s0 4(s2)
 			opcode: OPCODE_MAP.get("str").unwrap().1 as u8,
 			reg1: get_register_value("s0") as u8,
 			write_back_reg: get_register_value("s2") as u8,
 			immediate: 4,
 			reg2: 0,
-		}
+		},
+		InstructionInfo { // li 0x2000 s1
+			opcode: OPCODE_MAP.get("li").unwrap().1 as u8,
+			immediate: 0x2000,
+			write_back_reg: get_register_value("s1") as u8,
+			reg1: 0,
+			reg2: 0,
+		},
+		InstructionInfo { // li -1 ra
+			opcode: OPCODE_MAP.get("li").unwrap().1 as u8,
+			immediate: -1,
+			write_back_reg: get_register_value("ra") as u8,
+			reg1: 0,
+			reg2: 0,
+		},
 	];
 
 	let assembled_program: Vec<u32> = assemble(&program, &labels).unwrap();
 	let parsed_program: Vec<InstructionInfo> = assembled_program.iter().copied().map(parse).collect();
 
 	for (idx, parsed) in parsed_program.iter().enumerate() {
-		assert_eq!(*parsed, expected_results[idx]);
+		assert_eq!(*parsed, expected_results[idx], "Mismatch -> {}", raw_program[idx]);
 	}
 }
