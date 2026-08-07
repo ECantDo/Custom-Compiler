@@ -21,9 +21,9 @@ impl Default for CpuFlags {
  * I -> Immediate flag; is this instruction using an immediate value?
  * M -> Main code; what part of the CPU is being used ... i.e. main ALU vs barrel shifter
 */
-const MAIN_OP_MASK: u8 = 0x0F; // first 4 bits of the opcode
-const IS_IMM_MASK: u8 = 0x10; // the fifth bit
-const UPPER_OP_MASK: u8 = 0xE0; // last 3 bits of the opcode
+pub const MAIN_OP_MASK: u8 = 0x0F; // first 4 bits of the opcode
+pub const IS_IMM_MASK: u8 = 0x10; // the fifth bit
+pub const UPPER_OP_MASK: u8 = 0xE0; // last 3 bits of the opcode
 
 const MAIN_OP_ALU: u8 = 0x01;
 const MAIN_OP_SHIFT: u8 = 0x02;
