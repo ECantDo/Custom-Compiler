@@ -1,4 +1,5 @@
 use crate::cpu::Word;
+use std::fmt;
 
 pub struct Registers {
 	registers: Box<[Word; Self::NUM]>,
@@ -21,5 +22,11 @@ impl Registers {
 
 	pub fn get(&self, index: u8) -> Word {
 		self.registers[index as usize]
+	}
+}
+
+impl fmt::Display for Registers {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "REGISTERS: {:?}", self.registers)
 	}
 }

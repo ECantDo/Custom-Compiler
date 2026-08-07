@@ -1,17 +1,19 @@
+use crate::assembler::operations::opcodes::OPCODE_MAP;
 use crate::cpu::alu::{run_alu_operation, CpuFlags, UPPER_OP_MASK};
+use crate::cpu::cpu_io::IoPorts;
 use crate::cpu::instruction_parser::{parse_instruction, InstructionInfo};
-use crate::cpu::io::IoPorts;
 use crate::cpu::program_counter::ProgramCounter;
 use crate::cpu::program_ram::ProgramRam;
 use crate::cpu::program_rom::ProgramMemory;
 use crate::cpu::registers::Registers;
+use std::io::{self, Write};
 
 mod alu;
 mod program_counter;
 mod program_rom;
 mod program_ram;
 mod registers;
-mod io;
+mod cpu_io;
 mod instruction_parser;
 
 type Word = i16;
@@ -62,6 +64,7 @@ pub fn start_cpu_from_program(program: &[u32]) {
 fn cpu_cycle(cpu_parts: &mut CpuParts) {
 	println!("Program Started");
 	let mut running = true;
+	let mut step: usize = 0;
 
 	while running {
 		// let cycle_start = Instant::now();
@@ -75,7 +78,7 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 			continue;
 		}
 
-		match info.opcode & !UPPER_OP_MASK{
+		match info.opcode & !UPPER_OP_MASK {
 			1 | 2 | 3 => {
 				// ALU, shifter, ADDF
 				let val1 = cpu_parts.registers.get(info.reg1);
@@ -97,7 +100,7 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 				let val1 = cpu_parts.registers.get(info.reg1);
 				let val2 = cpu_parts.registers.get(info.reg2);
 
-				run_alu_operation(info.opcode, val1, val2, &mut cpu_parts.cpu_flags);
+				run_alu_operation(OPCODE_MAP.get("sub").unwrap().1 as u8, val1, val2, &mut cpu_parts.cpu_flags);
 
 				if branch_taken((info.opcode & UPPER_OP_MASK) >> 5, &cpu_parts.cpu_flags) {
 					cpu_parts.program_counter.add(info.immediate);
@@ -107,14 +110,14 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 				cpu_parts.registers.set(info.write_back_reg, info.immediate);
 			}
 			7 => {
-				let addr = cpu_parts.registers.get(info.reg1) + info.immediate;
+				let addr = cpu_parts.registers.get(info.write_back_reg) + info.immediate;
 				if (info.opcode & UPPER_OP_MASK) >> 5 == 0 {
 					// str
-					let value = cpu_parts.registers.get(info.write_back_reg); // This seems dumb
+					let value = cpu_parts.registers.get(info.reg1); // This seems dumb
 					cpu_parts.program_ram.set(addr as UnsignedWord, value);
 				} else {
 					// lod
-					cpu_parts.registers.set(info.write_back_reg,
+					cpu_parts.registers.set(info.reg1,
 					                        cpu_parts.program_ram.get(addr as UnsignedWord));
 				}
 			}
@@ -143,7 +146,11 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 				panic!("Unknown function -> {}", info.opcode);
 			}
 		}
+		print!("{} : {} : S{}\r", cpu_parts.program_counter.get(), cpu_parts.registers, step);
+		io::stdout().flush().unwrap();
+		step += 1;
 	}
+	println!("\n{}", cpu_parts.program_ram)
 }
 
 fn branch_taken(condition: u8, flags: &CpuFlags) -> bool {

@@ -1,4 +1,5 @@
 use crate::cpu::{UnsignedWord, Word, RAM_SIZE};
+use std::fmt;
 
 pub struct ProgramRam {
 	ram: Box<[Word; RAM_SIZE]>,
@@ -19,5 +20,11 @@ impl ProgramRam {
 
 	pub fn get(&self, index: UnsignedWord) -> Word {
 		self.ram[index as usize]
+	}
+}
+
+impl fmt::Display for ProgramRam {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{:?}", self.ram)
 	}
 }
