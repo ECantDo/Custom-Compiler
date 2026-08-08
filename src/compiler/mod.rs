@@ -1,3 +1,4 @@
+
 mod lexer;
 mod ast;
 pub mod parser;
@@ -5,7 +6,7 @@ mod typecheck;
 
 #[test]
 fn test_parsing(){
-	use crate::compiler::{lexer::tokenize, parser::Parser};
+	use crate::compiler::{lexer::tokenize, parser::Parser, typecheck::check_program};
 	use std::fs;
 
 	//
@@ -15,7 +16,8 @@ fn test_parsing(){
 
 	let tokens = tokenize(&source);
 	let mut parser = Parser::new(tokens);
-	let program = parser.parse_program();
+	let mut program = parser.parse_program();
 
+	check_program(&mut program);
 	println!("{:#?}", program);
 }
