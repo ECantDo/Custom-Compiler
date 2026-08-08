@@ -34,7 +34,7 @@ impl Parser {
 		}
 	}
 
-	pub fn parse_expression(&mut self) -> Expr {
+	fn parse_expression(&mut self) -> Expr {
 		let expr = self.parse_binary(2);
 		if self.check(&TokenKind::Eq) {
 			self.advance();
@@ -190,6 +190,113 @@ impl Parser {
 		self.expect(TokenKind::Semicolon);
 
 		Stmt::Let { name, mutable, ty, value }
+	}
+
+	fn parse_block(&mut self) -> Vec<Stmt> {
+		self.expect(TokenKind::LBrace);
+		let mut stmts = Vec::new();
+		while !self.check(&TokenKind::RBrace) {
+			stmts.push(self.parse_statement());
+		}
+		self.expect(TokenKind::RBrace);
+		stmts
+	}
+
+	fn parse_statement(&mut self) -> Stmt {
+		match self.peek() {
+			TokenKind::Let => self.parse_let(),
+			TokenKind::If => self.parse_if(),
+			TokenKind::While => self.parse_while(),
+			TokenKind::Return => self.parse_return(),
+			_ => {
+				let expr = self.parse_expression();
+				self.expect(TokenKind::Semicolon);
+				Stmt::ExprStmt(expr)
+			}
+		}
+	}
+
+	fn parse_if(&mut self) -> Stmt {
+		self.expect(TokenKind::If);
+		let cond = self.parse_expression();
+		let then_branch = self.parse_block();
+		let else_branch = if self.check(&TokenKind::Else) {
+			self.advance();
+			Some(self.parse_block())
+		} else {
+			None
+		};
+		Stmt::If { cond, then_branch, else_branch }
+	}
+
+	fn parse_while(&mut self) -> Stmt {
+		self.expect(TokenKind::While);
+		let cond = self.parse_expression();
+		let body = self.parse_block();
+		Stmt::While { cond, body }
+	}
+
+	fn parse_return(&mut self) -> Stmt {
+		self.expect(TokenKind::Return);
+		let value = if self.check(&TokenKind::Semicolon) {
+			None
+		} else {
+			Some(self.parse_expression())
+		};
+		self.expect(TokenKind::Semicolon);
+		Stmt::Return(value)
+	}
+
+	fn parse_fn_decl(&mut self) -> Stmt {
+		self.expect(TokenKind::Fn);
+
+		let name = match self.advance().kind.clone() {
+			TokenKind::Identifier(name) => name,
+			other => panic!("expected function name, found {:?}", other),
+		};
+
+		self.expect(TokenKind::LParen);
+		let mut params = Vec::new();
+		if !self.check(&TokenKind::RParen) {
+			loop {
+				let param_name = match self.advance().kind.clone() {
+					TokenKind::Identifier(name) => name,
+					other => panic!("expected parameter name, found {:?}", other),
+				};
+				self.expect(TokenKind::Colon);
+				let ty = self.parse_type();
+				params.push(Param { name: param_name, ty });
+
+				if self.check(&TokenKind::Comma) {
+					self.advance();
+				} else {
+					break;
+				}
+			}
+		}
+		self.expect(TokenKind::RParen);
+
+		let return_ty = if self.check(&TokenKind::Arrow) {
+			self.advance();
+			Some(self.parse_type())
+		} else {
+			None
+		};
+
+		let body = self.parse_block();
+
+		Stmt::FnDecl { name, params, return_ty, body }
+	}
+
+	// =============================================================================================
+	// Weeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+	// =============================================================================================
+	pub fn parse_program(&mut self) -> Program {
+		let mut functions = Vec::new();
+		while !self.check(&TokenKind::Eof) {
+			functions.push(self.parse_fn_decl());
+		}
+		Program { functions }
 	}
 }
 
