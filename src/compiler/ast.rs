@@ -1,9 +1,14 @@
-//formatter:off
+#[derive(Debug, Clone)]
+pub struct Program {
+	pub functions: Vec<Stmt>, // each one is a Stmt::FnDecl
+}
 
+
+//@formatter:off
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-	I16, I32, U16, U32,
-	Pointer { mutable: bool, inner: Box<Type> }, // *mut T / *const T
+	I16, I32, U16, U32, Bool,
+	Pointer { mutable: bool, inner: Box<Type> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,6 +18,7 @@ pub enum BinOp {
 	Eq, NotEq, Lt, Gt, LtEq, GtEq,
 	And, Or, // && ||
 }
+//@formatter:on
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnOp {
@@ -23,6 +29,7 @@ pub enum UnOp {
 #[derive(Debug, Clone)]
 pub enum Expr {
 	IntLiteral(i64),
+	BoolLiteral(bool),
 	Identifier(String),
 	Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
 	Unary { op: UnOp, expr: Box<Expr> },

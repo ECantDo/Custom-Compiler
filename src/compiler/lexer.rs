@@ -23,6 +23,8 @@ pub enum TokenKind {
 	// punctuation
 	LParen, RParen, LBrace, RBrace, LBracket, RBracket, Semicolon, Comma,
 
+	True, False,
+
 	Eof,
 }
 //@formatter:on
@@ -125,6 +127,8 @@ impl<'a> Lexer<'a> {
 			"mut" => TokenKind::Mut,
 			"as" => TokenKind::As,
 			"fn" => TokenKind::Fn,
+			"true" => TokenKind::True,
+			"false" => TokenKind::False,
 			_ => TokenKind::Identifier(text),
 		};
 
