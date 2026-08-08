@@ -1,0 +1,216 @@
+use crate::compiler::{ast::*, lexer::{Token, TokenKind}};
+
+pub struct Parser {
+	tokens: Vec<Token>,
+	pos: usize,
+}
+
+impl Parser {
+	pub fn new(tokens: Vec<Token>) -> Self {
+		Parser { tokens, pos: 0 }
+	}
+
+	fn peek(&self) -> &TokenKind {
+		&self.tokens[self.pos].kind
+	}
+
+	fn advance(&mut self) -> &Token {
+		let tok = &self.tokens[self.pos];
+		if self.pos < self.tokens.len() - 1 {
+			self.pos += 1;
+		}
+		tok
+	}
+
+	fn check(&self, kind: &TokenKind) -> bool {
+		self.peek() == kind
+	}
+
+	fn expect(&mut self, kind: TokenKind) -> &Token {
+		if self.check(&kind) {
+			self.advance()
+		} else {
+			panic!("expected {:?}, found {:?} at line {}", kind, self.peek(), self.tokens[self.pos].line);
+		}
+	}
+
+	pub fn parse_expression(&mut self) -> Expr {
+		let expr = self.parse_binary(2);
+		if self.check(&TokenKind::Eq) {
+			self.advance();
+			let value = self.parse_expression();
+			return Expr::Assign { target: Box::new(expr), value: Box::new(value) };
+		}
+
+		expr
+	}
+
+	fn parse_unary(&mut self) -> Expr {
+		match self.peek() {
+			TokenKind::Minus => {
+				self.advance();
+				Expr::Unary { op: UnOp::Neg, expr: Box::new(self.parse_unary()) }
+			}
+			TokenKind::Bang => {
+				self.advance();
+				Expr::Unary { op: UnOp::Not, expr: Box::new(self.parse_unary()) }
+			}
+			TokenKind::Star => {
+				self.advance();
+				Expr::Deref(Box::new(self.parse_unary()))
+			}
+			TokenKind::Amp => {
+				self.advance();
+				Expr::AddrOf(Box::new(self.parse_unary()))
+			}
+			_ => self.parse_cast()
+		}
+	}
+
+	fn parse_cast(&mut self) -> Expr {
+		let mut expr = self.parse_primary();
+		while self.check(&TokenKind::As) { // consume `x as as as as i16`
+			self.advance();
+			let ty = self.parse_type();
+			expr = Expr::Cast { expr: Box::new(expr), ty };
+		}
+		expr
+	}
+
+	fn parse_binary(&mut self, min_prec: u8) -> Expr {
+		let mut left = self.parse_unary();
+		loop {
+			let (op, prec) = match binop_info(self.peek()) {
+				Some(info) if info.1 >= min_prec => info,
+				_ => break,
+			};
+			self.advance();
+			let right = self.parse_binary(prec + 1);
+			left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+		}
+
+		left
+	}
+
+	fn parse_type(&mut self) -> Type {
+		if self.check(&TokenKind::Star) {
+			self.advance(); // consume '*'
+
+			let mutable = if self.check(&TokenKind::Mut) {
+				self.advance();
+				true
+			} else if self.check(&TokenKind::As) {
+				// placeholder — see note below, 'const' isn't a keyword yet
+				panic!("const pointers not wired up yet");
+			} else {
+				panic!("expected 'mut' or 'const' after '*' in pointer type");
+			};
+
+			let inner = self.parse_type();
+			return Type::Pointer { mutable, inner: Box::new(inner) };
+		}
+
+		match self.advance().kind.clone() {
+			TokenKind::Identifier(name) => match name.as_str() {
+				"i16" => Type::I16,
+				"i32" => Type::I32,
+				"u16" => Type::U16,
+				"u32" => Type::U32,
+				"bool" => Type::Bool,
+				other => panic!("unknown type '{other}'"),
+			},
+			other => panic!("expected a type, found {other:?}"),
+		}
+	}
+
+	fn parse_primary(&mut self) -> Expr {
+		match self.advance().kind.clone() {
+			TokenKind::IntLiteral(n) => Expr::IntLiteral(n),
+			TokenKind::True => Expr::BoolLiteral(true),
+			TokenKind::False => Expr::BoolLiteral(false),
+
+			TokenKind::Identifier(name) => {
+				if self.check(&TokenKind::LParen) {
+					// Function call
+					self.advance(); // Consume `(`
+					let mut args = Vec::new();
+					if !self.check(&TokenKind::RParen) {
+						loop {
+							args.push(self.parse_expression());
+							if self.check(&TokenKind::Comma) {
+								self.advance();
+							} else {
+								break;
+							}
+						}
+					}
+
+					self.expect(TokenKind::RParen);
+					Expr::Call { name, args }
+				} else {
+					Expr::Identifier(name)
+				}
+			}
+
+			TokenKind::LParen => {
+				// ( expr )
+				let expr = self.parse_expression();
+				self.expect(TokenKind::RParen);
+				expr
+			}
+
+			other => panic!("Unexpected token in expression {:?}", other),
+		}
+	}
+
+	fn parse_let(&mut self) -> Stmt {
+		self.expect(TokenKind::Let);
+
+		let mutable = if self.check(&TokenKind::Mut) {
+			self.advance();
+			true
+		} else {
+			false
+		};
+
+		let name = match self.advance().kind.clone() {
+			TokenKind::Identifier(name) => name,
+			other => panic!("expected identifier, found {:?}", other),
+		};
+
+		let ty = if self.check(&TokenKind::Colon) {
+			self.advance();
+			Some(self.parse_type())
+		} else {
+			None
+		};
+
+		self.expect(TokenKind::Eq);
+		let value = self.parse_expression();
+		self.expect(TokenKind::Semicolon);
+
+		Stmt::Let { name, mutable, ty, value }
+	}
+}
+
+fn binop_info(kind: &TokenKind) -> Option<(BinOp, u8)> {
+	use TokenKind::*;
+	Some(match kind {
+		Plus => (BinOp::Add, 9),
+		Minus => (BinOp::Sub, 9),
+		Shl => (BinOp::Shl, 8),
+		Shr => (BinOp::Shr, 8),
+		Amp => (BinOp::BitAnd, 7),
+		Caret => (BinOp::BitXor, 6),
+		Pipe => (BinOp::BitOr, 5),
+		EqEq => (BinOp::Eq, 4),
+		BangEq => (BinOp::NotEq, 4),
+		Lt => (BinOp::Lt, 4),
+		Gt => (BinOp::Gt, 4),
+		LtEq => (BinOp::LtEq, 4),
+		GtEq => (BinOp::GtEq, 4),
+		AmpAmp => (BinOp::And, 3),
+		PipePipe => (BinOp::Or, 2),
+		_ => return None,
+	})
+}
