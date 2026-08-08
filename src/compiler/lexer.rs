@@ -316,7 +316,7 @@ impl<'a> Lexer<'a> {
 	}
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+pub fn tokenize(source: &str) -> Vec<Token> {
 	let mut lexer: Lexer = Lexer::new(source);
 	let mut tokens: Vec<Token> = Vec::new();
 

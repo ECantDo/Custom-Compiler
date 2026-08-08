@@ -1,4 +1,4 @@
 pub mod assembler;
 
 pub mod cpu;
-mod compiler;
+pub mod compiler;
