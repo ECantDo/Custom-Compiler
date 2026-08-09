@@ -96,22 +96,21 @@ impl Parser {
 
 	fn parse_type(&mut self) -> Type {
 		if self.check(&TokenKind::Star) {
-			self.advance(); // consume '*'
-
+			let line = self.peek_line();
+			self.advance();
 			let mutable = if self.check(&TokenKind::Mut) {
 				self.advance();
 				true
 			} else if self.check(&TokenKind::As) {
-				// placeholder — see note below, 'const' isn't a keyword yet
-				panic!("const pointers not wired up yet");
+				panic!("const pointers not wired up yet at line {}", line);
 			} else {
-				panic!("expected 'mut' or 'const' after '*' in pointer type");
+				panic!("expected 'mut' or 'const' after '*' in pointer type at line {}", line);
 			};
-
 			let inner = self.parse_type();
 			return Type::Pointer { mutable, inner: Box::new(inner) };
 		}
 
+		let line = self.peek_line();
 		match self.advance().kind.clone() {
 			TokenKind::Identifier(name) => match name.as_str() {
 				"i16" => Type::I16,
@@ -119,13 +118,14 @@ impl Parser {
 				"u16" => Type::U16,
 				"u32" => Type::U32,
 				"bool" => Type::Bool,
-				other => panic!("unknown type '{other}'"),
+				other => panic!("unknown type '{other}' at line {}", line),
 			},
-			other => panic!("expected a type, found {other:?}"),
+			other => panic!("expected a type, found {other:?} at line {}", line),
 		}
 	}
 
 	fn parse_primary(&mut self) -> Expr {
+		let line = self.peek_line();
 		match self.advance().kind.clone() {
 			TokenKind::IntLiteral(n) => Expr::IntLiteral(n),
 			TokenKind::True => Expr::BoolLiteral(true),
@@ -133,20 +133,14 @@ impl Parser {
 
 			TokenKind::Identifier(name) => {
 				if self.check(&TokenKind::LParen) {
-					// Function call
-					self.advance(); // Consume `(`
+					self.advance();
 					let mut args = Vec::new();
 					if !self.check(&TokenKind::RParen) {
 						loop {
 							args.push(self.parse_expression());
-							if self.check(&TokenKind::Comma) {
-								self.advance();
-							} else {
-								break;
-							}
+							if self.check(&TokenKind::Comma) { self.advance(); } else { break; }
 						}
 					}
-
 					self.expect(TokenKind::RParen);
 					Expr::Call { name, args }
 				} else {
@@ -155,42 +149,35 @@ impl Parser {
 			}
 
 			TokenKind::LParen => {
-				// ( expr )
 				let expr = self.parse_expression();
 				self.expect(TokenKind::RParen);
 				expr
 			}
 
-			other => panic!("Unexpected token in expression {:?}", other),
+			other => panic!("unexpected token in expression: {:?} at line {}", other, line),
 		}
 	}
 
 	fn parse_let(&mut self) -> Stmt {
 		self.expect(TokenKind::Let);
-
 		let mutable = if self.check(&TokenKind::Mut) {
 			self.advance();
 			true
-		} else {
-			false
-		};
+		} else { false };
 
+		let line = self.peek_line();
 		let name = match self.advance().kind.clone() {
 			TokenKind::Identifier(name) => name,
-			other => panic!("expected identifier, found {:?}", other),
+			other => panic!("expected identifier, found {:?} at line {}", other, line),
 		};
 
 		let ty = if self.check(&TokenKind::Colon) {
 			self.advance();
 			Some(self.parse_type())
-		} else {
-			None
-		};
-
+		} else { None };
 		self.expect(TokenKind::Eq);
 		let value = self.parse_expression();
 		self.expect(TokenKind::Semicolon);
-
 		Stmt::Let { name, mutable, ty, value }
 	}
 
@@ -252,28 +239,25 @@ impl Parser {
 	fn parse_fn_decl(&mut self) -> Stmt {
 		self.expect(TokenKind::Fn);
 
+		let line = self.peek_line();
 		let name = match self.advance().kind.clone() {
 			TokenKind::Identifier(name) => name,
-			other => panic!("expected function name, found {:?}", other),
+			other => panic!("expected function name, found {:?} at line {}", other, line),
 		};
 
 		self.expect(TokenKind::LParen);
 		let mut params = Vec::new();
 		if !self.check(&TokenKind::RParen) {
 			loop {
+				let param_line = self.peek_line();
 				let param_name = match self.advance().kind.clone() {
 					TokenKind::Identifier(name) => name,
-					other => panic!("expected parameter name, found {:?}", other),
+					other => panic!("expected parameter name, found {:?} at line {}", other, param_line),
 				};
 				self.expect(TokenKind::Colon);
 				let ty = self.parse_type();
 				params.push(Param { name: param_name, ty });
-
-				if self.check(&TokenKind::Comma) {
-					self.advance();
-				} else {
-					break;
-				}
+				if self.check(&TokenKind::Comma) { self.advance(); } else { break; }
 			}
 		}
 		self.expect(TokenKind::RParen);
@@ -281,12 +265,8 @@ impl Parser {
 		let return_ty = if self.check(&TokenKind::Arrow) {
 			self.advance();
 			Some(self.parse_type())
-		} else {
-			None
-		};
-
+		} else { None };
 		let body = self.parse_block();
-
 		Stmt::FnDecl { name, params, return_ty, body }
 	}
 
@@ -295,19 +275,21 @@ impl Parser {
 	// =============================================================================================
 	fn parse_const_decl(&mut self) -> ConstDecl {
 		self.expect(TokenKind::Const);
+
+		let line = self.peek_line();
 		let name = match self.advance().kind.clone() {
 			TokenKind::Identifier(name) => name,
-			other => panic!("expected const name, found {:?}", other),
+			other => panic!("expected const name, found {:?} at line {}", other, line),
 		};
+
 		self.expect(TokenKind::Colon);
 		let ty = self.parse_type();
 		self.expect(TokenKind::Eq);
 		let expr = self.parse_expression();
 		self.expect(TokenKind::Semicolon);
 
-		let value = eval_const_expr(&expr, &self.const_values);
+		let value = eval_const_expr(&expr, &self.const_values, line);
 		self.const_values.insert(name.clone(), value);
-
 		ConstDecl { name, ty, value }
 	}
 
@@ -315,13 +297,18 @@ impl Parser {
 		let mut consts = Vec::new();
 		let mut functions = Vec::new();
 		while !self.check(&TokenKind::Eof) {
+			let line = self.peek_line();
 			match self.peek() {
 				TokenKind::Const => consts.push(self.parse_const_decl()),
 				TokenKind::Fn => functions.push(self.parse_fn_decl()),
-				other => panic!("expected 'const' or 'fn' at top level, found {:?}", other),
+				other => panic!("expected 'const' or 'fn' at top level, found {:?} at line {}", other, line),
 			}
 		}
 		Program { consts, functions }
+	}
+
+	fn peek_line(&self) -> usize {
+		self.tokens[self.pos].line
 	}
 }
 
@@ -347,26 +334,23 @@ fn binop_info(kind: &TokenKind) -> Option<(BinOp, u8)> {
 	})
 }
 
-fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>) -> i64 {
+fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>, line: usize) -> i64 {
 	match expr {
 		Expr::IntLiteral(n) => *n,
-
 		Expr::Identifier(name) => *known.get(name).unwrap_or_else(|| panic!(
-			"'{name}' isn't a previously-declared const — consts can only \
-             reference EARLIER consts, top-to-bottom, no forward references"
+			"'{name}' isn't a previously-declared const at line {} — consts can only \
+             reference EARLIER consts, top-to-bottom, no forward references", line
 		)),
-
 		Expr::Unary { op, expr } => {
-			let v = eval_const_expr(expr, known);
+			let v = eval_const_expr(expr, known, line);
 			match op {
 				UnOp::Neg => -v,
-				UnOp::Not => !v,
+				UnOp::Not => !v
 			}
 		}
-
 		Expr::Binary { op, left, right } => {
-			let l = eval_const_expr(left, known);
-			let r = eval_const_expr(right, known);
+			let l = eval_const_expr(left, known, line);
+			let r = eval_const_expr(right, known, line);
 			match op {
 				BinOp::Add => l + r,
 				BinOp::Sub => l - r,
@@ -375,15 +359,9 @@ fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>) -> i64 {
 				BinOp::BitXor => l ^ r,
 				BinOp::Shl => l << r,
 				BinOp::Shr => l >> r,
-				other => panic!(
-					"'{:?}' doesn't produce a number and can't be used in a const expression", other
-				),
+				other => panic!("'{:?}' doesn't produce a number and can't be used in a const expression at line {}", other, line),
 			}
 		}
-
-		other => panic!(
-			"const expressions only support literals, earlier consts, and \
-             + - & | ^ << >> — found {:?}", other
-		),
+		other => panic!("const expressions only support literals, earlier consts, and + - & | ^ << >> — found {:?} at line {}", other, line),
 	}
 }
