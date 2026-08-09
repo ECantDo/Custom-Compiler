@@ -464,7 +464,7 @@ impl<'ctx> Codegen<'ctx> {
 		if self.build_mode != BuildMode::Dev { return; }
 
 		let fn_name = scope.function.get_name().to_str().unwrap();
-		if fn_name == "malloc" || fn_name == "free" { return; }
+		if fn_name == "malloc" || fn_name == "free" || fn_name == "initialize_heap" { return; }
 
 		let i16_type = self.context.i16_type();
 		let is_zero = self.builder.build_int_compare(

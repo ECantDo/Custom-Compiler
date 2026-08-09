@@ -1,13 +1,15 @@
 use crate::compiler::{ast::*, lexer::{Token, TokenKind}};
+use std::collections::HashMap;
 
 pub struct Parser {
 	tokens: Vec<Token>,
 	pos: usize,
+	const_values: HashMap<String, i64>,
 }
 
 impl Parser {
 	pub fn new(tokens: Vec<Token>) -> Self {
-		Parser { tokens, pos: 0 }
+		Parser { tokens, pos: 0, const_values: HashMap::new() }
 	}
 
 	fn peek(&self) -> &TokenKind {
@@ -300,14 +302,12 @@ impl Parser {
 		self.expect(TokenKind::Colon);
 		let ty = self.parse_type();
 		self.expect(TokenKind::Eq);
-		let value = match self.advance().kind.clone() {
-			TokenKind::IntLiteral(n) => n,
-			other => panic!(
-				"const values must be a plain integer literal, found {:?} — \
-             expressions/calls aren't allowed in const declarations", other
-			),
-		};
+		let expr = self.parse_expression();
 		self.expect(TokenKind::Semicolon);
+
+		let value = eval_const_expr(&expr, &self.const_values);
+		self.const_values.insert(name.clone(), value);
+
 		ConstDecl { name, ty, value }
 	}
 
@@ -345,4 +345,45 @@ fn binop_info(kind: &TokenKind) -> Option<(BinOp, u8)> {
 		PipePipe => (BinOp::Or, 2),
 		_ => return None,
 	})
+}
+
+fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>) -> i64 {
+	match expr {
+		Expr::IntLiteral(n) => *n,
+
+		Expr::Identifier(name) => *known.get(name).unwrap_or_else(|| panic!(
+			"'{name}' isn't a previously-declared const — consts can only \
+             reference EARLIER consts, top-to-bottom, no forward references"
+		)),
+
+		Expr::Unary { op, expr } => {
+			let v = eval_const_expr(expr, known);
+			match op {
+				UnOp::Neg => -v,
+				UnOp::Not => !v,
+			}
+		}
+
+		Expr::Binary { op, left, right } => {
+			let l = eval_const_expr(left, known);
+			let r = eval_const_expr(right, known);
+			match op {
+				BinOp::Add => l + r,
+				BinOp::Sub => l - r,
+				BinOp::BitAnd => l & r,
+				BinOp::BitOr => l | r,
+				BinOp::BitXor => l ^ r,
+				BinOp::Shl => l << r,
+				BinOp::Shr => l >> r,
+				other => panic!(
+					"'{:?}' doesn't produce a number and can't be used in a const expression", other
+				),
+			}
+		}
+
+		other => panic!(
+			"const expressions only support literals, earlier consts, and \
+             + - & | ^ << >> — found {:?}", other
+		),
+	}
 }
