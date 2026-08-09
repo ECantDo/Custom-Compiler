@@ -1,6 +1,14 @@
 #[derive(Debug, Clone)]
+pub struct ConstDecl {
+	pub name: String,
+	pub ty: Type,
+	pub value: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
-	pub functions: Vec<Stmt>, // each one is a Stmt::FnDecl
+	pub consts: Vec<ConstDecl>,
+	pub functions: Vec<Stmt>,
 }
 
 

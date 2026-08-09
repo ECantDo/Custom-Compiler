@@ -16,6 +16,7 @@ pub struct Codegen<'ctx> {
 	// consumed by general function-call codegen. `None` return means void.
 	fn_sigs: HashMap<String, (Vec<Type>, Option<Type>)>,
 	build_mode: BuildMode,
+	consts: HashMap<String, (Type, i64)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -44,6 +45,15 @@ impl<'ctx> FnScope<'ctx> {
 		}
 		panic!("undefined variable '{name}'");
 	}
+
+	fn try_resolve(&self, name: &str) -> Option<(PointerValue<'ctx>, Type)> {
+		for scope in self.names.iter().rev() {
+			if let Some(id) = scope.get(name) {
+				return self.allocas.get(id).cloned();
+			}
+		}
+		None
+	}
 }
 
 fn stmt_key(stmt: &Stmt) -> usize { stmt as *const Stmt as usize }
@@ -56,6 +66,7 @@ impl<'ctx> Codegen<'ctx> {
 			builder: context.create_builder(),
 			fn_sigs: HashMap::new(),
 			build_mode,
+			consts: HashMap::default(),
 		}
 	}
 
@@ -84,6 +95,9 @@ impl<'ctx> Codegen<'ctx> {
 	}
 
 	pub fn lower_program(&mut self, program: &Program) {
+		for c in &program.consts {
+			self.consts.insert(c.name.clone(), (c.ty.clone(), c.value));
+		}
 		for func in &program.functions {
 			if let Stmt::FnDecl { name, params, return_ty, .. } = func {
 				let param_types: Vec<_> = params.iter()
@@ -241,9 +255,15 @@ impl<'ctx> Codegen<'ctx> {
 			}
 
 			Expr::Identifier(name) => {
-				let (ptr, ty) = scope.resolve(name);
-				let llvm_ty = self.llvm_int_type(&ty);
-				(self.builder.build_load(llvm_ty, ptr, name).unwrap(), ty)
+				if let Some((ptr, ty)) = scope.try_resolve(name) {
+					let llvm_ty = self.llvm_basic_type(&ty);
+					(self.builder.build_load(llvm_ty, ptr, name).unwrap(), ty)
+				} else if let Some((ty, value)) = self.consts.get(name).cloned() {
+					let llvm_ty = self.llvm_int_type(&ty);
+					(llvm_ty.const_int(value as u64, Self::is_signed(&ty)).into(), ty)
+				} else {
+					panic!("undefined variable '{name}'")
+				}
 			}
 
 			Expr::Binary { op, left, right } => {
@@ -357,7 +377,7 @@ impl<'ctx> Codegen<'ctx> {
 				assert_eq!(args.len(), 1, "fetch(addr) takes exactly one argument");
 				let (addr_val, _addr_ty) = self.lower_expr(&args[0], None, scope);
 				self.check_zero_address_allowed(addr_val, scope);
-				
+
 				let word_ty = self.context.i16_type();
 				let ptr_ty = self.context.ptr_type(AddressSpace::default());
 				let ptr = self.builder

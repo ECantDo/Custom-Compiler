@@ -291,12 +291,37 @@ impl Parser {
 	// =============================================================================================
 	// Weeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 	// =============================================================================================
+	fn parse_const_decl(&mut self) -> ConstDecl {
+		self.expect(TokenKind::Const);
+		let name = match self.advance().kind.clone() {
+			TokenKind::Identifier(name) => name,
+			other => panic!("expected const name, found {:?}", other),
+		};
+		self.expect(TokenKind::Colon);
+		let ty = self.parse_type();
+		self.expect(TokenKind::Eq);
+		let value = match self.advance().kind.clone() {
+			TokenKind::IntLiteral(n) => n,
+			other => panic!(
+				"const values must be a plain integer literal, found {:?} — \
+             expressions/calls aren't allowed in const declarations", other
+			),
+		};
+		self.expect(TokenKind::Semicolon);
+		ConstDecl { name, ty, value }
+	}
+
 	pub fn parse_program(&mut self) -> Program {
+		let mut consts = Vec::new();
 		let mut functions = Vec::new();
 		while !self.check(&TokenKind::Eof) {
-			functions.push(self.parse_fn_decl());
+			match self.peek() {
+				TokenKind::Const => consts.push(self.parse_const_decl()),
+				TokenKind::Fn => functions.push(self.parse_fn_decl()),
+				other => panic!("expected 'const' or 'fn' at top level, found {:?}", other),
+			}
 		}
-		Program { functions }
+		Program { consts, functions }
 	}
 }
 
