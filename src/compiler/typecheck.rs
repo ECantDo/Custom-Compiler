@@ -179,6 +179,13 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch
 			Inferred::Concrete(Type::I16)
 		}
 
+		Expr::Call { name, args } if name == "store" => {
+			assert_eq!(args.len(), 2, "store(addr, value) takes exactly two arguments");
+			infer_expr(&args[0], symbols, ctx, scratch, sigs);
+			infer_expr(&args[1], symbols, ctx, scratch, sigs);
+			Inferred::Concrete(Type::I16)
+		}
+
 		// General function calls - looks up the real declared signature (this is
 		// what malloc/free will go through once you write them as real `fn`s).
 		Expr::Call { name, args } => {
