@@ -1,6 +1,6 @@
+use cpu_simulator_rs::compiler::compile_to_ll;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-
 
 /// Port of `Assembler.BuildToSchematic.main`.
 ///
@@ -39,35 +39,8 @@ use std::io::{BufWriter, Write};
 // 	// Build::runBuildToSchem(file_name + ".bin");
 // }
 
-
-mod compiler {
-	pub mod lexer;
-	pub mod ast;
-	pub mod parser;
-	pub mod typecheck;
-	pub mod codegen;
-}
-
-use compiler::{codegen::Codegen, lexer::tokenize, parser::Parser, typecheck::check_program};
-use inkwell::context::Context;
-use std::fs;
-
 fn main() {
-	let path = "./src/compiler/programs/fib.ecc";
-	let source = fs::read_to_string(path).expect("failed to read source file");
-
-	let tokens = tokenize(&source);
-	let mut parser = Parser::new(tokens);
-	let mut program = parser.parse_program();
-
-	check_program(&mut program);
-
-	let context = Context::create();
-	let mut codegen = Codegen::new(&context, "my_module");
-	codegen.lower_program(&program);
-
-	codegen.module.print_to_file("out.ll").expect("failed to write .ll file");
-	println!("wrote out.ll");
+	compile_to_ll("./src/compiler/programs/std_lib.ecc")
 }
 
 /// Port of `BuildToSchematic.writeToAsciiBinary`.

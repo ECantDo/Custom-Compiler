@@ -2,14 +2,18 @@ use crate::compiler::ast::*;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
-use inkwell::IntPredicate;
+use inkwell::{AddressSpace, IntPredicate};
 use std::collections::HashMap;
 
 pub struct Codegen<'ctx> {
 	context: &'ctx Context,
 	pub module: Module<'ctx>,
 	builder: Builder<'ctx>,
+	// name -> (param types, return type). Populated in pass 1 of lower_program,
+	// consumed by general function-call codegen. `None` return means void.
+	fn_sigs: HashMap<String, (Vec<Type>, Option<Type>)>,
 }
 
 struct FnScope<'ctx> {
@@ -44,15 +48,27 @@ impl<'ctx> Codegen<'ctx> {
 			context,
 			module: context.create_module(module_name),
 			builder: context.create_builder(),
+			fn_sigs: HashMap::new(),
 		}
 	}
 
+	/// Strictly-integer type conversion. Used where we already know the type
+	/// can't be a pointer (int literals, arithmetic operands, cast widths).
 	fn llvm_int_type(&self, ty: &Type) -> inkwell::types::IntType<'ctx> {
 		match ty {
 			Type::I16 | Type::U16 => self.context.i16_type(),
 			Type::I32 | Type::U32 => self.context.i32_type(),
 			Type::Bool => self.context.bool_type(),
-			Type::Pointer { .. } => panic!("pointers not wired into codegen yet"),
+			Type::Pointer { .. } => panic!("expected an integer type, found a pointer type"),
+		}
+	}
+
+	/// General type conversion covering pointers too. Used anywhere a value
+	/// of ANY type might need an LLVM type (allocas, params, fn return types).
+	fn llvm_basic_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
+		match ty {
+			Type::Pointer { .. } => self.context.ptr_type(AddressSpace::default()).into(),
+			_ => self.llvm_int_type(ty).into(),
 		}
 	}
 
@@ -64,13 +80,16 @@ impl<'ctx> Codegen<'ctx> {
 		for func in &program.functions {
 			if let Stmt::FnDecl { name, params, return_ty, .. } = func {
 				let param_types: Vec<_> = params.iter()
-					.map(|p| self.llvm_int_type(&p.ty).into())
+					.map(|p| self.llvm_basic_type(&p.ty).into())
 					.collect();
 				let fn_type = match return_ty {
-					Some(rt) => self.llvm_int_type(rt).fn_type(&param_types, false),
+					Some(rt) => self.llvm_basic_type(rt).fn_type(&param_types, false),
 					None => self.context.void_type().fn_type(&param_types, false),
 				};
 				self.module.add_function(name, fn_type, None);
+
+				let sig_param_types = params.iter().map(|p| p.ty.clone()).collect();
+				self.fn_sigs.insert(name.clone(), (sig_param_types, return_ty.clone()));
 			}
 		}
 		for func in &program.functions {
@@ -91,7 +110,7 @@ impl<'ctx> Codegen<'ctx> {
 		// no Stmt of its own — using the param's index is fine, guaranteed
 		// unique within this function and never collides with a real Stmt address
 		for (i, param) in params.iter().enumerate() {
-			let llvm_ty = self.llvm_int_type(&param.ty);
+			let llvm_ty = self.llvm_basic_type(&param.ty);
 			let alloca = self.builder.build_alloca(llvm_ty, &param.name).unwrap();
 			self.builder.build_store(alloca, function.get_nth_param(i as u32).unwrap()).unwrap();
 			let id = i; // synthetic id, distinct namespace from Stmt addresses in practice
@@ -101,7 +120,7 @@ impl<'ctx> Codegen<'ctx> {
 
 		// hoist every `let` (including inside if/while) into entry-block allocas
 		for (id, name, ty) in collect_lets(body) {
-			let llvm_ty = self.llvm_int_type(&ty);
+			let llvm_ty = self.llvm_basic_type(&ty);
 			let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
 			scope.allocas.insert(id, (alloca, ty));
 		}
@@ -194,8 +213,19 @@ impl<'ctx> Codegen<'ctx> {
 		match expr {
 			Expr::IntLiteral(n) => {
 				let ty = hint.cloned().unwrap_or(Type::I16);
-				let llvm_ty = self.llvm_int_type(&ty);
-				(llvm_ty.const_int(*n as u64, Self::is_signed(&ty)).into(), ty)
+				match &ty {
+					Type::Pointer { .. } if *n == 0 => {
+						let ptr_ty = self.context.ptr_type(AddressSpace::default());
+						(ptr_ty.const_null().into(), ty)
+					}
+					Type::Pointer { .. } => panic!(
+						"only `0` is supported as a raw pointer literal right now (got {n}) - cast an integer instead"
+					),
+					_ => {
+						let llvm_ty = self.llvm_int_type(&ty);
+						(llvm_ty.const_int(*n as u64, Self::is_signed(&ty)).into(), ty)
+					}
+				}
 			}
 
 			Expr::BoolLiteral(b) => {
@@ -242,36 +272,143 @@ impl<'ctx> Codegen<'ctx> {
 			}
 
 			Expr::Assign { target, value } => {
-				let name = match target.as_ref() {
-					Expr::Identifier(name) => name,
-					_ => panic!("only plain identifier assignment targets supported right now"),
-				};
-				let (ptr, ty) = scope.resolve(name);
-				let (val, _) = self.lower_expr(value, Some(&ty), scope);
-				self.builder.build_store(ptr, val).unwrap();
-				(val, ty)
+				match target.as_ref() {
+					Expr::Identifier(name) => {
+						let (ptr, ty) = scope.resolve(name);
+						let (val, _) = self.lower_expr(value, Some(&ty), scope);
+						self.builder.build_store(ptr, val).unwrap();
+						(val, ty)
+					}
+					Expr::Deref(inner) => {
+						let (ptr_val, ptr_ty) = self.lower_expr(inner, None, scope);
+						let inner_ty = match ptr_ty {
+							Type::Pointer { inner, .. } => *inner,
+							other => panic!("cannot dereference non-pointer type {other:?} as an assignment target"),
+						};
+						let (val, _) = self.lower_expr(value, Some(&inner_ty), scope);
+						self.builder.build_store(ptr_val.into_pointer_value(), val).unwrap();
+						(val, inner_ty)
+					}
+					_ => panic!("only plain identifiers and *pointer derefs are supported as assignment targets right now"),
+				}
 			}
 
 			Expr::Cast { expr, ty } => {
 				let (val, from_ty) = self.lower_expr(expr, None, scope);
-				let target_llvm = self.llvm_int_type(ty);
-				let (from_bits, to_bits) = (self.llvm_int_type(&from_ty).get_bit_width(), target_llvm.get_bit_width());
-				let result = if from_bits < to_bits {
-					if Self::is_signed(&from_ty) {
-						self.builder.build_int_s_extend(val.into_int_value(), target_llvm, "sexttmp").unwrap()
-					} else {
-						self.builder.build_int_z_extend(val.into_int_value(), target_llvm, "zexttmp").unwrap()
+
+				match (&from_ty, ty) {
+					// pointer-to-pointer: opaque pointers carry no LLVM-level
+					// type info, so this is a relabel, not a real instruction.
+					(Type::Pointer { .. }, Type::Pointer { .. }) => (val, ty.clone()),
+
+					(Type::Pointer { .. }, _) => {
+						let target = self.llvm_int_type(ty);
+						let result = self.builder
+							.build_ptr_to_int(val.into_pointer_value(), target, "ptrtointtmp")
+							.unwrap();
+						(result.into(), ty.clone())
 					}
-				} else if from_bits > to_bits {
-					self.builder.build_int_truncate(val.into_int_value(), target_llvm, "trunctmp").unwrap()
-				} else {
-					val.into_int_value()
-				};
-				(result.into(), ty.clone())
+
+					(_, Type::Pointer { .. }) => {
+						let ptr_ty = self.context.ptr_type(AddressSpace::default());
+						let result = self.builder
+							.build_int_to_ptr(val.into_int_value(), ptr_ty, "inttoptrtmp")
+							.unwrap();
+						(result.into(), ty.clone())
+					}
+
+					_ => {
+						let target_llvm = self.llvm_int_type(ty);
+						let (from_bits, to_bits) = (
+							self.llvm_int_type(&from_ty).get_bit_width(),
+							target_llvm.get_bit_width(),
+						);
+						let result = if from_bits < to_bits {
+							if Self::is_signed(&from_ty) {
+								self.builder.build_int_s_extend(val.into_int_value(), target_llvm, "sexttmp").unwrap()
+							} else {
+								self.builder.build_int_z_extend(val.into_int_value(), target_llvm, "zexttmp").unwrap()
+							}
+						} else if from_bits > to_bits {
+							self.builder.build_int_truncate(val.into_int_value(), target_llvm, "trunctmp").unwrap()
+						} else {
+							val.into_int_value()
+						};
+						(result.into(), ty.clone())
+					}
+				}
 			}
 
-			Expr::Call { .. } => panic!("function calls not wired into codegen yet"),
-			Expr::Deref(_) | Expr::AddrOf(_) => panic!("pointers not wired into codegen yet"),
+			// `fetch(addr)` is the one true intrinsic - lowers straight to an
+			// int-to-pointer cast + load, no real function call involved.
+			// Always reads a full Word; confirm that's the width you actually
+			// want (matches `lod` from the CPU project, but worth double-checking
+			// this compiler is meant to model that at all given it targets the
+			// host's real architecture via LLVM, not your custom ISA).
+			Expr::Call { name, args } if name == "fetch" => {
+				assert_eq!(args.len(), 1, "fetch(addr) takes exactly one argument");
+				let (addr_val, _addr_ty) = self.lower_expr(&args[0], None, scope);
+				let word_ty = self.context.i16_type();
+				let ptr_ty = self.context.ptr_type(AddressSpace::default());
+				let ptr = self.builder
+					.build_int_to_ptr(addr_val.into_int_value(), ptr_ty, "fetchaddr")
+					.unwrap();
+				let loaded = self.builder.build_load(word_ty, ptr, "fetchval").unwrap();
+				(loaded, Type::I16)
+			}
+
+			// General function calls - this is the path malloc/free will go
+			// through once you write them as real `fn`s in your language.
+			Expr::Call { name, args } => {
+				let function = self.module.get_function(name)
+					.unwrap_or_else(|| panic!("undefined function '{name}'"));
+				let (param_tys, return_ty) = self.fn_sigs.get(name)
+					.unwrap_or_else(|| panic!("no recorded signature for function '{name}'"))
+					.clone();
+
+				let arg_vals: Vec<_> = args.iter().zip(param_tys.iter())
+					.map(|(arg, pty)| self.lower_expr(arg, Some(pty), scope).0.into())
+					.collect();
+
+				let call = self.builder.build_call(function, &arg_vals, "calltmp").unwrap();
+
+				match return_ty {
+					Some(ret_ty) => {
+						let val = call.try_as_basic_value().unwrap_basic();
+							//.expect("function has a declared return type but produced no value");
+						(val, ret_ty)
+					}
+					None => panic!(
+						"'{name}' returns void - calling it as a value-producing expression isn't supported yet (call it as a statement instead)"
+					),
+				}
+			}
+
+			Expr::Deref(inner) => {
+				let (ptr_val, ptr_ty) = self.lower_expr(inner, None, scope);
+				let inner_ty = match ptr_ty {
+					Type::Pointer { inner, .. } => *inner,
+					other => panic!("cannot dereference non-pointer type {other:?}"),
+				};
+				let llvm_inner_ty = self.llvm_basic_type(&inner_ty);
+				let loaded = self.builder
+					.build_load(llvm_inner_ty, ptr_val.into_pointer_value(), "derefload")
+					.unwrap();
+				(loaded, inner_ty)
+			}
+
+			Expr::AddrOf(inner) => {
+				match inner.as_ref() {
+					Expr::Identifier(name) => {
+						let (ptr, ty) = scope.resolve(name);
+						// NOTE: always marked mutable - FnScope doesn't currently
+						// track whether the underlying `let` was declared `mut`,
+						// so this doesn't yet enforce const-pointer safety.
+						(ptr.into(), Type::Pointer { mutable: true, inner: Box::new(ty) })
+					}
+					_ => panic!("can only take the address of a plain variable right now"),
+				}
+			}
 		}
 	}
 }

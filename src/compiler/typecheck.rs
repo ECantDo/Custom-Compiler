@@ -107,7 +107,22 @@ enum Inferred {
 	Concrete(Type),
 	Var(TypeVar),
 }
-fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch: &mut HashMap<usize, Inferred>) -> Inferred {
+
+/// name -> (param types, return type). `None` return type means void.
+pub type FnSigs = HashMap<String, (Vec<Type>, Option<Type>)>;
+
+fn build_fn_sigs(program: &Program) -> FnSigs {
+	let mut sigs = FnSigs::new();
+	for func in &program.functions {
+		if let Stmt::FnDecl { name, params, return_ty, .. } = func {
+			let param_types = params.iter().map(|p| p.ty.clone()).collect();
+			sigs.insert(name.clone(), (param_types, return_ty.clone()));
+		}
+	}
+	sigs
+}
+
+fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch: &mut HashMap<usize, Inferred>, sigs: &FnSigs) -> Inferred {
 	let result = match expr {
 		Expr::IntLiteral(_) => Inferred::Var(ctx.fresh_var()),
 		Expr::BoolLiteral(_) => Inferred::Concrete(Type::Bool),
@@ -116,8 +131,8 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch
 			.unwrap_or_else(|| panic!("undefined variable '{name}'")),
 
 		Expr::Binary { op, left, right } => {
-			let lt = infer_expr(left, symbols, ctx, scratch);
-			let rt = infer_expr(right, symbols, ctx, scratch);
+			let lt = infer_expr(left, symbols, ctx, scratch, sigs);
+			let rt = infer_expr(right, symbols, ctx, scratch, sigs);
 			unify(&lt, &rt, ctx);
 			match op {
 				BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt
@@ -126,20 +141,20 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch
 			}
 		}
 		Expr::Assign { target, value } => {
-			let target_ty = infer_expr(target, symbols, ctx, scratch);
-			let value_ty = infer_expr(value, symbols, ctx, scratch);
+			let target_ty = infer_expr(target, symbols, ctx, scratch, sigs);
+			let value_ty = infer_expr(value, symbols, ctx, scratch, sigs);
 			unify(&target_ty, &value_ty, ctx);
 			target_ty
 		}
 		Expr::Unary { op, expr } => {
-			let t = infer_expr(expr, symbols, ctx, scratch);
+			let t = infer_expr(expr, symbols, ctx, scratch, sigs);
 			match op {
 				UnOp::Neg => t,
 				UnOp::Not => Inferred::Concrete(Type::Bool),
 			}
 		}
 		Expr::Deref(inner) => {
-			match infer_expr(inner, symbols, ctx, scratch) {
+			match infer_expr(inner, symbols, ctx, scratch, sigs) {
 				Inferred::Concrete(Type::Pointer { inner, .. }) => Inferred::Concrete(*inner),
 				Inferred::Concrete(other) => panic!("cannot dereference non-pointer type {:?}", other),
 				Inferred::Var(_) => panic!("cannot dereference a value of unknown type — annotate it"),
@@ -147,7 +162,7 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch
 		}
 		Expr::Cast { ty, .. } => Inferred::Concrete(ty.clone()),
 		Expr::AddrOf(inner) => {
-			let inner_ty = infer_expr(inner, symbols, ctx, scratch);
+			let inner_ty = infer_expr(inner, symbols, ctx, scratch, sigs);
 			match inner_ty {
 				Inferred::Concrete(t) => Inferred::Concrete(Type::Pointer { mutable: true, inner: Box::new(t) }),
 				Inferred::Var(_) => panic!("cannot take address of a value of unknown type — annotate it"),
@@ -155,28 +170,42 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch
 		}
 
 		// =========================================================================================
-		// Built-in Calls
-
-		Expr::Call { name, args } if name == "malloc" => {
-			for arg in args {
-				infer_expr(arg, symbols, ctx, scratch);
-			}
-			Inferred::Concrete(Type::Pointer { mutable: true, inner: Box::new(Type::U16) })
-		}
-		Expr::Call { name, args } if name == "free" => {
-			for arg in args {
-				infer_expr(arg, symbols, ctx, scratch);
-			}
-			Inferred::Concrete(Type::I16) // Dummy return ... should be Void
-		}
-		Expr::Call {name, args} if name == "fetch" => {
-			for arg in args {
-				infer_expr(arg, symbols, ctx, scratch);
-			}
-			Inferred::Concrete(Type::I16) // actually returns something
+		// `fetch` is the one true intrinsic - it's the primitive everything else
+		// (including malloc/free, once you write them) bottoms out on, so it can't
+		// itself be written in your language. Always reads one full Word.
+		Expr::Call { name, args } if name == "fetch" => {
+			assert_eq!(args.len(), 1, "fetch(addr) takes exactly one argument");
+			infer_expr(&args[0], symbols, ctx, scratch, sigs);
+			Inferred::Concrete(Type::I16)
 		}
 
-		Expr::Call { .. } => panic!("function calls not yet supported by the type checker"),
+		// General function calls - looks up the real declared signature (this is
+		// what malloc/free will go through once you write them as real `fn`s).
+		Expr::Call { name, args } => {
+			let (param_tys, return_ty) = sigs.get(name)
+				.unwrap_or_else(|| panic!("call to undefined function '{name}'"));
+
+			if args.len() != param_tys.len() {
+				panic!(
+					"'{name}' expects {} argument(s), got {}",
+					param_tys.len(), args.len()
+				);
+			}
+
+			for (arg, expected) in args.iter().zip(param_tys.iter()) {
+				let arg_ty = infer_expr(arg, symbols, ctx, scratch, sigs);
+				unify(&arg_ty, &Inferred::Concrete(expected.clone()), ctx);
+			}
+
+			match return_ty {
+				Some(t) => Inferred::Concrete(t.clone()),
+				// Same "not really modeled" gap as before for void - calling a
+				// void function as a value-producing expression will silently
+				// type as I16 rather than erroring. Fine for statement-position
+				// calls (`free(p);`)
+				None => Inferred::Concrete(Type::I16),
+			}
+		}
 
 		_ => todo!(),
 	};
@@ -195,8 +224,8 @@ fn unify(a: &Inferred, b: &Inferred, ctx: &mut TypeContext) {
 		_ => {}
 	}
 }
-fn check_let(name: &str, ty: &Option<Type>, value: &Expr, symbols: &mut SymbolTable, ctx: &mut TypeContext, scratch: &mut HashMap<usize, Inferred>) {
-	let value_ty = infer_expr(value, symbols, ctx, scratch);
+fn check_let(name: &str, ty: &Option<Type>, value: &Expr, symbols: &mut SymbolTable, ctx: &mut TypeContext, scratch: &mut HashMap<usize, Inferred>, sigs: &FnSigs) {
+	let value_ty = infer_expr(value, symbols, ctx, scratch, sigs);
 
 	let declared = match ty {
 		Some(explicit) => {
@@ -218,10 +247,11 @@ fn check_stmt(
 	ctx: &mut TypeContext,
 	scratch: &mut HashMap<usize, Inferred>,
 	let_types: &mut HashMap<usize, Inferred>,
+	sigs: &FnSigs,
 ) {
 	match stmt {
 		Stmt::Let { name, ty, value, .. } => {
-			let value_ty = infer_expr(value, symbols, ctx, scratch);
+			let value_ty = infer_expr(value, symbols, ctx, scratch, sigs);
 			let declared = match ty {
 				Some(explicit) => {
 					unify(&value_ty, &Inferred::Concrete(explicit.clone()), ctx);
@@ -234,31 +264,31 @@ fn check_stmt(
 		}
 
 		Stmt::If { cond, then_branch, else_branch } => {
-			let cond_ty = infer_expr(cond, symbols, ctx, scratch);
+			let cond_ty = infer_expr(cond, symbols, ctx, scratch, sigs);
 			unify(&cond_ty, &Inferred::Concrete(Type::Bool), ctx);
 			symbols.push_scope();
-			for s in then_branch { check_stmt(s, symbols, ctx, scratch, let_types); }
+			for s in then_branch { check_stmt(s, symbols, ctx, scratch, let_types, sigs); }
 			symbols.pop_scope();
 			if let Some(else_b) = else_branch {
 				symbols.push_scope();
-				for s in else_b { check_stmt(s, symbols, ctx, scratch, let_types); }
+				for s in else_b { check_stmt(s, symbols, ctx, scratch, let_types, sigs); }
 				symbols.pop_scope();
 			}
 		}
 
 		Stmt::While { cond, body } => {
-			let cond_ty = infer_expr(cond, symbols, ctx, scratch);
+			let cond_ty = infer_expr(cond, symbols, ctx, scratch, sigs);
 			unify(&cond_ty, &Inferred::Concrete(Type::Bool), ctx);
 			symbols.push_scope();
-			for s in body { check_stmt(s, symbols, ctx, scratch, let_types); }
+			for s in body { check_stmt(s, symbols, ctx, scratch, let_types, sigs); }
 			symbols.pop_scope();
 		}
 
 		Stmt::Return(expr) => {
-			if let Some(e) = expr { infer_expr(e, symbols, ctx, scratch); }
+			if let Some(e) = expr { infer_expr(e, symbols, ctx, scratch, sigs); }
 		}
 
-		Stmt::ExprStmt(expr) => { infer_expr(expr, symbols, ctx, scratch); }
+		Stmt::ExprStmt(expr) => { infer_expr(expr, symbols, ctx, scratch, sigs); }
 
 		Stmt::FnDecl { .. } => panic!("nested functions not supported yet"),
 	}
@@ -288,6 +318,8 @@ fn assign_let_types(stmt: &mut Stmt, resolved: &HashMap<usize, Type>) {
 }
 
 pub fn check_program(program: &mut Program) {
+	let sigs = build_fn_sigs(program);
+
 	for func in &mut program.functions {
 		if let Stmt::FnDecl { params, body, .. } = func {
 			let mut symbols = SymbolTable::new();
@@ -300,7 +332,7 @@ pub fn check_program(program: &mut Program) {
 			}
 
 			for stmt in body.iter() {
-				check_stmt(stmt, &mut symbols, &mut ctx, &mut scratch, &mut let_types);
+				check_stmt(stmt, &mut symbols, &mut ctx, &mut scratch, &mut let_types, &sigs);
 			}
 
 			let resolved: HashMap<usize, Type> = let_types.into_iter()
