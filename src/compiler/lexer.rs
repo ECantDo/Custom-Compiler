@@ -5,7 +5,7 @@ pub enum TokenKind {
 	Identifier(String),   // covers var names AND type names (i16/i32/u16/u32/etc.)
 
 	// keywords
-	Let, Mut, Fn, If, Else, While, Return, As,
+	Let, Mut, Fn, If, Else, While, Return, As, Const,
 
 	// operators
 	Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret,
@@ -129,6 +129,7 @@ impl<'a> Lexer<'a> {
 			"fn" => TokenKind::Fn,
 			"true" => TokenKind::True,
 			"false" => TokenKind::False,
+			"const" => TokenKind::Const,
 			_ => TokenKind::Identifier(text),
 		};
 
@@ -136,6 +137,38 @@ impl<'a> Lexer<'a> {
 	}
 
 	fn scan_number(&mut self, first: char, line: usize, col: usize) -> Token {
+		if first == '0' && self.peek() == Some('x') {
+			self.advance(); // consume 'x'
+			let mut hex = String::new();
+			while let Some(c) = self.peek() {
+				if c.is_ascii_hexdigit() {
+					hex.push(c);
+					self.advance();
+				} else {
+					break;
+				}
+			}
+			let value = i64::from_str_radix(&hex, 16)
+				.unwrap_or_else(|_| panic!("invalid hex literal at {line}:{col}"));
+			return Token { kind: TokenKind::IntLiteral(value), line, col };
+		}
+
+		if first == '0' && self.peek() == Some('b') {
+			self.advance(); // consume 'b'
+			let mut bin = String::new();
+			while let Some(c) = self.peek() {
+				if c == '0' || c == '1' {
+					bin.push(c);
+					self.advance();
+				} else {
+					break;
+				}
+			}
+			let value = i64::from_str_radix(&bin, 2)
+				.unwrap_or_else(|_| panic!("invalid bin literal at {line}:{col}"));
+			return Token { kind: TokenKind::IntLiteral(value), line, col };
+		}
+
 		let mut text = String::from(first);
 		while let Some(c) = self.peek() {
 			if c.is_ascii_digit() {
@@ -145,10 +178,7 @@ impl<'a> Lexer<'a> {
 				break;
 			}
 		}
-
-		let kind = TokenKind::IntLiteral(text.parse().unwrap());
-
-		Token { kind, line, col }
+		Token { kind: TokenKind::IntLiteral(text.parse().unwrap()), line, col }
 	}
 
 	fn next_token(&mut self) -> Token {
