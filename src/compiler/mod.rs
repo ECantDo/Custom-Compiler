@@ -1,4 +1,4 @@
-use crate::compiler::codegen::Codegen;
+use crate::compiler::codegen::{BuildMode, Codegen};
 use crate::compiler::lexer::tokenize;
 use crate::compiler::parser::Parser;
 use crate::compiler::typecheck::check_program;
@@ -12,7 +12,7 @@ mod lexer;
 mod ast;
 pub mod parser;
 mod typecheck;
-mod codegen;
+pub mod codegen;
 
 const OUTPUT_DIR: &str = "compiled";
 
@@ -40,8 +40,10 @@ pub fn optimize(module: &inkwell::module::Module, opt_level: &str) {
 		.expect("failed to run optimization passes");
 }
 
-pub fn compile_to_ll(path: &str) {
+pub fn compile_to_ll(path: &str, mode: BuildMode) {
 	// let path = "./src/compiler/programs/fib.ecc";
+	// let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
+
 	let source = fs::read_to_string(path).expect("failed to read source file");
 
 	let tokens = tokenize(&source);
@@ -51,7 +53,7 @@ pub fn compile_to_ll(path: &str) {
 	check_program(&mut program);
 
 	let context = Context::create();
-	let mut codegen = Codegen::new(&context, "my_module");
+	let mut codegen = Codegen::new(&context, "my_module", mode);
 	codegen.lower_program(&program);
 
 	if let Err(e) = codegen.module.verify() {

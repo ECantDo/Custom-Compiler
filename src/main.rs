@@ -1,3 +1,4 @@
+use cpu_simulator_rs::compiler::codegen::BuildMode;
 use cpu_simulator_rs::compiler::compile_to_ll;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -40,7 +41,9 @@ use std::io::{BufWriter, Write};
 // }
 
 fn main() {
-	compile_to_ll("./src/compiler/programs/std_lib.ecc")
+	let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
+
+	compile_to_ll("./src/compiler/programs/std_lib.ecc", mode)
 }
 
 /// Port of `BuildToSchematic.writeToAsciiBinary`.
