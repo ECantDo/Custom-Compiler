@@ -153,6 +153,29 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, ctx: &mut TypeContext, scratch
 				Inferred::Var(_) => panic!("cannot take address of a value of unknown type — annotate it"),
 			}
 		}
+
+		// =========================================================================================
+		// Built-in Calls
+
+		Expr::Call { name, args } if name == "malloc" => {
+			for arg in args {
+				infer_expr(arg, symbols, ctx, scratch);
+			}
+			Inferred::Concrete(Type::Pointer { mutable: true, inner: Box::new(Type::U16) })
+		}
+		Expr::Call { name, args } if name == "free" => {
+			for arg in args {
+				infer_expr(arg, symbols, ctx, scratch);
+			}
+			Inferred::Concrete(Type::I16) // Dummy return ... should be Void
+		}
+		Expr::Call {name, args} if name == "fetch" => {
+			for arg in args {
+				infer_expr(arg, symbols, ctx, scratch);
+			}
+			Inferred::Concrete(Type::I16) // actually returns something
+		}
+
 		Expr::Call { .. } => panic!("function calls not yet supported by the type checker"),
 
 		_ => todo!(),
