@@ -1,0 +1,123 @@
+const FREE_MASK: u16 = 0x8000;
+const ADDRESS_MASK: u16 = FREE_MASK - 1;
+const HEAP_SIZE: u16 = 127; // 127 words --- change if I make the memory larger
+
+fn initialize_heap() {
+	// The heap will be 1 leading word + 128 words (for now)
+	// This also means that the second word will be the first heap node.
+	store(0, 1); // Funny enough, this still works for bump allocation
+	// Each linked-list node will start with 1 word, and end with 1 word.
+	// Each word leading and trailing will contain the size of the node (in words, not bytes), and a flag as the
+	// top-bit. 1 = This chunk of memory IS free; 0 = This chunk of memory is NOT free.
+	let free_size = FREE_MASK | HEAP_SIZE;
+
+	// Our entire heap is free, so store 0x807F -> `heap_size` with top bit on
+	store(1, free_size);
+
+	// We do not need to store at the end of our heap, because nothing comes after it
+}
+
+// fn malloc(size: u16) -> *mut u16 {
+// 	// check if we can malloc ... don't give me something on 0 size
+// 	if size == 0 {
+// 		return 0 as *mut u16;
+// 	}
+//
+//
+// 	let mut current_address: u16  = fetch(0) as u16;
+//
+// 	// Need 2 extra words on any size
+// 	let mut required_size = size + 2;
+//
+// 	let mut re_map_start = true;
+//
+// 	while current_address < HEAP_SIZE {
+// 		if current_address >= HEAP_SIZE {
+// 			return 0 as *mut u16;
+// 		}
+//
+// 		let header = fetch(current_address) as u16;
+// 		let free_size: u16 = header & ADDRESS_MASK;
+//
+// 		let is_free = header & FREE_MASK != 0;
+//
+// 		// Find next free section, if the current section is too small ... or is taken
+// 		if free_size < required_size || !is_free {
+// 			current_address += free_size + 2;
+// 			re_map_start = false;
+// 			continue;
+// 		}
+//
+// 		// Our current section is now available for the taking
+//
+// 		// If the remaining split space is smaller than a valid block (2 metadata + 1 payload),
+// 		// consume the entire chunk to avoid leaving dead, unreachable bytes in RAM.
+// 		if free_size < required_size + 3 {
+// 			size = free_size; // Upgrade our size to use the whole block
+// 			required_size = free_size + 2;
+// 		}
+//
+// 		// Resize the current node to the size we need, and mark as used
+// 		store(current_address, size);
+//
+// 		// Create a trailing node thingy
+// 		store(current_address + size + 1, size);
+//
+// 		// Create a new node after our current one, for the next section ... if that next section doesn't yet exist
+// 		let next_size = free_size - required_size;
+// 		let next_block_addr = current_address + required_size;
+//
+// 		if free_size > size {
+// 			// Write the new split free block's header
+// 			store(next_block_addr, next_size | FREE_MASK);
+// 			// Write the new split free block's footer at the end of the original boundary
+// 			store(next_block_addr + 1 + next_size, next_size | FREE_MASK);
+//
+// 			if re_map_start {
+// 				store(0, next_block_addr);
+// 			}
+// 		} else {
+// 			// If we consumed the whole block and re_map_start is true, Word 0 cannot point
+// 			// to next_block_addr because it's no longer free. We must find the next free block.
+// 			if re_map_start {
+// 				let mut scan_addr = next_block_addr;
+// 				let mut found_next_free = false;
+//
+// 				while scan_addr < HEAP_SIZE {
+// 					let scan_hdr = fetch(scan_addr) as u16;
+// 					if (scan_hdr & FREE_MASK) != 0 {
+// 						store(0, scan_addr);
+// 						found_next_free = true;
+// 						break;
+// 					}
+// 					scan_addr += (scan_hdr & ADDRESS_MASK) + 2;
+// 				}
+//
+// 				// If no remaining free blocks exist in the entire heap, mark Word 0 as exhausted
+// 				if !found_next_free {
+// 					store(0, HEAP_SIZE);
+// 				}
+// 			}
+// 		}
+//
+// 		return (current_address + 1) as *mut u16;
+// 	}
+// 	return 0 as *mut u16;
+// }
+
+fn malloc(size: u16) -> *mut u16 {
+	let current_ptr = fetch(0) as u16;
+	let next_ptr = current_ptr + size;
+
+	// Fast boundary check against your hardcoded Heap limit
+	if next_ptr > HEAP_SIZE {
+		return 0 as *mut u16;
+	}
+
+	store(0, next_ptr); // "Bump" the pointer forward for the next allocation
+	return current_ptr as *mut u16; // Return the raw, zero-overhead address
+}
+
+fn free() {
+	store(0, 1);
+}
