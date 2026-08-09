@@ -313,7 +313,8 @@ fn check_stmt(
 		}
 
 		Stmt::ExprStmt(expr) => { infer_expr(expr, symbols, consts, ctx, scratch, sigs); }
-
+		Stmt::Continue => {} // no expression, nothing to infer
+		Stmt::Break => {}
 		Stmt::FnDecl { .. } => panic!("nested functions not supported yet"),
 	}
 }

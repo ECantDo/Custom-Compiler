@@ -5,7 +5,10 @@ pub enum TokenKind {
 	Identifier(String),   // covers var names AND type names (i16/i32/u16/u32/etc.)
 
 	// keywords
-	Let, Mut, Fn, If, Else, While, Return, As, Const,
+	Let, Mut, Fn, If, Else, Return, As, Const, 
+	
+	// Loop
+	Continue, Break, While,
 
 	// operators
 	Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret,
@@ -130,7 +133,9 @@ impl<'a> Lexer<'a> {
 			"true" => TokenKind::True,
 			"false" => TokenKind::False,
 			"const" => TokenKind::Const,
-			_ => TokenKind::Identifier(text),
+			"continue" => TokenKind::Continue,
+			"break" => TokenKind::Break,
+				_ => TokenKind::Identifier(text),
 		};
 
 		Token { kind, line, col }

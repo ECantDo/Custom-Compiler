@@ -197,12 +197,26 @@ impl Parser {
 			TokenKind::If => self.parse_if(),
 			TokenKind::While => self.parse_while(),
 			TokenKind::Return => self.parse_return(),
+			TokenKind::Continue => self.parse_continue(),
+			TokenKind::Break => self.parse_break(),
 			_ => {
 				let expr = self.parse_expression();
 				self.expect(TokenKind::Semicolon);
 				Stmt::ExprStmt(expr)
 			}
 		}
+	}
+
+	fn parse_break(&mut self) -> Stmt {
+		self.expect(TokenKind::Break);
+		self.expect(TokenKind::Semicolon);
+		Stmt::Break
+	}
+
+	fn parse_continue(&mut self) -> Stmt {
+		self.expect(TokenKind::Continue);
+		self.expect(TokenKind::Semicolon);
+		Stmt::Continue
 	}
 
 	fn parse_if(&mut self) -> Stmt {

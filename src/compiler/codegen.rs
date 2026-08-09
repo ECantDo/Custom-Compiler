@@ -1,5 +1,6 @@
 use crate::compiler::ast::*;
 use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -26,12 +27,19 @@ struct FnScope<'ctx> {
 	allocas: HashMap<usize, (PointerValue<'ctx>, Type)>, // keyed by unique Stmt address, never collides
 	names: Vec<HashMap<String, usize>>,                   // scope stack: name -> alloca id
 	function: FunctionValue<'ctx>,
+	loop_targets: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 }
 
 impl<'ctx> FnScope<'ctx> {
 	fn new(function: FunctionValue<'ctx>) -> Self {
-		FnScope { allocas: HashMap::new(), names: vec![HashMap::new()], function }
+		FnScope {
+			allocas: HashMap::new(),
+			names: vec![HashMap::new()],
+			function,
+			loop_targets: Vec::new(),
+		}
 	}
+
 	fn push(&mut self) { self.names.push(HashMap::new()); }
 	fn pop(&mut self) { self.names.pop(); }
 	fn declare(&mut self, name: &str, id: usize) {
@@ -157,6 +165,18 @@ impl<'ctx> Codegen<'ctx> {
 		}
 	}
 
+	/// Lowers a list of statements, stopping early if one of them terminates
+	/// the current block (return/continue/break) — anything after that point
+	/// is unreachable and must NOT be lowered, or LLVM will reject the IR.
+	fn lower_stmts(&mut self, stmts: &[Stmt], scope: &mut FnScope<'ctx>, function: FunctionValue<'ctx>) {
+		for s in stmts {
+			self.lower_stmt(s, scope, function);
+			if self.builder.get_insert_block().unwrap().get_terminator().is_some() {
+				break;
+			}
+		}
+	}
+
 	fn lower_stmt(&mut self, stmt: &Stmt, scope: &mut FnScope<'ctx>, function: FunctionValue<'ctx>) {
 		match stmt {
 			Stmt::Let { name, value, .. } => {
@@ -189,13 +209,25 @@ impl<'ctx> Codegen<'ctx> {
 
 				self.builder.position_at_end(body_bb);
 				scope.push();
-				for s in body { self.lower_stmt(s, scope, function); }
+				scope.loop_targets.push((cond_bb, end_bb)); // <-- both pushed together
+				self.lower_stmts(body, scope, function);
+				scope.loop_targets.pop();
 				scope.pop();
 				if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
 					self.builder.build_unconditional_branch(cond_bb).unwrap();
 				}
 
 				self.builder.position_at_end(end_bb);
+			}
+			Stmt::Continue => {
+				let (target, _) = *scope.loop_targets.last()
+					.unwrap_or_else(|| panic!("'continue' used outside of a loop"));
+				self.builder.build_unconditional_branch(target).unwrap();
+			}
+			Stmt::Break => {
+				let (_, target) = *scope.loop_targets.last()
+					.unwrap_or_else(|| panic!("'break' used outside of a loop"));
+				self.builder.build_unconditional_branch(target).unwrap();
 			}
 
 			Stmt::If { cond, then_branch, else_branch } => {

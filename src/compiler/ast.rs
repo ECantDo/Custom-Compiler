@@ -61,5 +61,7 @@ pub enum Stmt {
 	While { cond: Expr, body: Vec<Stmt> },
 	Return(Option<Expr>),
 	ExprStmt(Expr),
+	Continue,
+	Break,
 	FnDecl { name: String, params: Vec<Param>, return_ty: Option<Type>, body: Vec<Stmt> },
 }
