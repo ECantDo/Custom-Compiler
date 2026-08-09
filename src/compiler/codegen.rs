@@ -13,8 +13,30 @@ pub struct Codegen<'ctx> {
 }
 
 struct FnScope<'ctx> {
-	vars: HashMap<String, (PointerValue<'ctx>, Type)>,
+	allocas: HashMap<usize, (PointerValue<'ctx>, Type)>, // keyed by unique Stmt address, never collides
+	names: Vec<HashMap<String, usize>>,                   // scope stack: name -> alloca id
 }
+
+impl<'ctx> FnScope<'ctx> {
+	fn new() -> Self {
+		FnScope { allocas: HashMap::new(), names: vec![HashMap::new()] }
+	}
+	fn push(&mut self) { self.names.push(HashMap::new()); }
+	fn pop(&mut self) { self.names.pop(); }
+	fn declare(&mut self, name: &str, id: usize) {
+		self.names.last_mut().unwrap().insert(name.to_string(), id);
+	}
+	fn resolve(&self, name: &str) -> (PointerValue<'ctx>, Type) {
+		for scope in self.names.iter().rev() {
+			if let Some(id) = scope.get(name) {
+				return self.allocas.get(id).unwrap().clone();
+			}
+		}
+		panic!("undefined variable '{name}'");
+	}
+}
+
+fn stmt_key(stmt: &Stmt) -> usize { stmt as *const Stmt as usize }
 
 impl<'ctx> Codegen<'ctx> {
 	pub fn new(context: &'ctx Context, module_name: &str) -> Self {
@@ -39,8 +61,6 @@ impl<'ctx> Codegen<'ctx> {
 	}
 
 	pub fn lower_program(&mut self, program: &Program) {
-		// pass 1: declare every function's signature first, so calls/recursion
-		// can find each other regardless of source order
 		for func in &program.functions {
 			if let Stmt::FnDecl { name, params, return_ty, .. } = func {
 				let param_types: Vec<_> = params.iter()
@@ -53,7 +73,6 @@ impl<'ctx> Codegen<'ctx> {
 				self.module.add_function(name, fn_type, None);
 			}
 		}
-		// pass 2: lower each body
 		for func in &program.functions {
 			self.lower_fn_decl(func);
 		}
@@ -66,25 +85,27 @@ impl<'ctx> Codegen<'ctx> {
 		let entry = self.context.append_basic_block(function, "entry");
 		self.builder.position_at_end(entry);
 
-		let mut scope = FnScope { vars: HashMap::new() };
+		let mut scope = FnScope::new();
 
-		// params: alloca + store, same as any other local
+		// params: alloca + store, each param gets a synthetic id since it has
+		// no Stmt of its own — using the param's index is fine, guaranteed
+		// unique within this function and never collides with a real Stmt address
 		for (i, param) in params.iter().enumerate() {
 			let llvm_ty = self.llvm_int_type(&param.ty);
 			let alloca = self.builder.build_alloca(llvm_ty, &param.name).unwrap();
 			self.builder.build_store(alloca, function.get_nth_param(i as u32).unwrap()).unwrap();
-			scope.vars.insert(param.name.clone(), (alloca, param.ty.clone()));
+			let id = i; // synthetic id, distinct namespace from Stmt addresses in practice
+			scope.allocas.insert(id, (alloca, param.ty.clone()));
+			scope.declare(&param.name, id);
 		}
 
-		// hoist every `let` in this function (including inside if/while) into
-		// entry-block allocas BEFORE lowering any statements — this is the fix
-		// for the loop-alloca problem described above
-		for (name, ty) in collect_lets(body) {
+		// hoist every `let` (including inside if/while) into entry-block allocas
+		for (id, name, ty) in collect_lets(body) {
 			let llvm_ty = self.llvm_int_type(&ty);
 			let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
-			scope.vars.insert(name.to_string(), (alloca, ty));
+			scope.allocas.insert(id, (alloca, ty));
 		}
-		self.builder.position_at_end(entry); // allocas may have moved the cursor
+		self.builder.position_at_end(entry);
 
 		for s in body {
 			self.lower_stmt(s, &mut scope, function);
@@ -98,9 +119,11 @@ impl<'ctx> Codegen<'ctx> {
 	fn lower_stmt(&mut self, stmt: &Stmt, scope: &mut FnScope<'ctx>, function: FunctionValue<'ctx>) {
 		match stmt {
 			Stmt::Let { name, value, .. } => {
-				let (ptr, ty) = scope.vars.get(name).expect("hoisted above").clone();
+				let id = stmt_key(stmt);
+				let (ptr, ty) = scope.allocas.get(&id).expect("hoisted above").clone();
 				let (val, _) = self.lower_expr(value, Some(&ty), scope);
 				self.builder.build_store(ptr, val).unwrap();
+				scope.declare(name, id); // name becomes visible from here onward
 			}
 
 			Stmt::ExprStmt(expr) => { self.lower_expr(expr, None, scope); }
@@ -124,7 +147,9 @@ impl<'ctx> Codegen<'ctx> {
 				self.builder.build_conditional_branch(cond_val.into_int_value(), body_bb, end_bb).unwrap();
 
 				self.builder.position_at_end(body_bb);
+				scope.push();
 				for s in body { self.lower_stmt(s, scope, function); }
+				scope.pop();
 				if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
 					self.builder.build_unconditional_branch(cond_bb).unwrap();
 				}
@@ -141,14 +166,18 @@ impl<'ctx> Codegen<'ctx> {
 				self.builder.build_conditional_branch(cond_val.into_int_value(), then_bb, else_bb).unwrap();
 
 				self.builder.position_at_end(then_bb);
+				scope.push();
 				for s in then_branch { self.lower_stmt(s, scope, function); }
+				scope.pop();
 				if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
 					self.builder.build_unconditional_branch(end_bb).unwrap();
 				}
 
 				self.builder.position_at_end(else_bb);
 				if let Some(else_b) = else_branch {
+					scope.push();
 					for s in else_b { self.lower_stmt(s, scope, function); }
+					scope.pop();
 				}
 				if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
 					self.builder.build_unconditional_branch(end_bb).unwrap();
@@ -161,13 +190,10 @@ impl<'ctx> Codegen<'ctx> {
 		}
 	}
 
-	/// Returns the lowered value AND the Type it was lowered as — the caller
-	/// (e.g. Binary) needs this to decide what an un-annotated literal sibling
-	/// should adopt.
 	fn lower_expr(&mut self, expr: &Expr, hint: Option<&Type>, scope: &mut FnScope<'ctx>) -> (BasicValueEnum<'ctx>, Type) {
 		match expr {
 			Expr::IntLiteral(n) => {
-				let ty = hint.cloned().unwrap_or(Type::I16); // your default rule
+				let ty = hint.cloned().unwrap_or(Type::I16);
 				let llvm_ty = self.llvm_int_type(&ty);
 				(llvm_ty.const_int(*n as u64, Self::is_signed(&ty)).into(), ty)
 			}
@@ -177,7 +203,7 @@ impl<'ctx> Codegen<'ctx> {
 			}
 
 			Expr::Identifier(name) => {
-				let (ptr, ty) = scope.vars.get(name).unwrap_or_else(|| panic!("undefined variable '{name}'")).clone();
+				let (ptr, ty) = scope.resolve(name);
 				let llvm_ty = self.llvm_int_type(&ty);
 				(self.builder.build_load(llvm_ty, ptr, name).unwrap(), ty)
 			}
@@ -220,7 +246,7 @@ impl<'ctx> Codegen<'ctx> {
 					Expr::Identifier(name) => name,
 					_ => panic!("only plain identifier assignment targets supported right now"),
 				};
-				let (ptr, ty) = scope.vars.get(name).unwrap().clone();
+				let (ptr, ty) = scope.resolve(name);
 				let (val, _) = self.lower_expr(value, Some(&ty), scope);
 				self.builder.build_store(ptr, val).unwrap();
 				(val, ty)
@@ -252,14 +278,17 @@ impl<'ctx> Codegen<'ctx> {
 
 /// Recursively finds every `let` in a statement list, including inside
 /// if/while bodies, so they can all be pre-allocated in the entry block.
-/// NOTE: doesn't currently handle two `let`s with the SAME name in different
-/// nested scopes (shadowing) — they'd collide on one alloca. Not an issue for
-/// fib.ecc, but a real gap if you shadow a name later.
-fn collect_lets(stmts: &[Stmt]) -> Vec<(&str, Type)> {
+/// Returns each one's unique Stmt address as an id, so two `let`s with the
+/// SAME name in different (even sibling) scopes no longer collide.
+fn collect_lets(stmts: &[Stmt]) -> Vec<(usize, &str, Type)> {
 	let mut out = Vec::new();
 	for stmt in stmts {
 		match stmt {
-			Stmt::Let { name, ty, .. } => out.push((name.as_str(), ty.clone().expect("typecheck should have filled this"))),
+			Stmt::Let { name, ty, .. } => out.push((
+				stmt_key(stmt),
+				name.as_str(),
+				ty.clone().expect("typecheck should have filled this"),
+			)),
 			Stmt::If { then_branch, else_branch, .. } => {
 				out.extend(collect_lets(then_branch));
 				if let Some(e) = else_branch { out.extend(collect_lets(e)); }
