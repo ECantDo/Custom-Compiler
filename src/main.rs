@@ -1,8 +1,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use cpu_simulator_rs::assembler::build;
-use cpu_simulator_rs::cpu::start_cpu_from_program;
 
 /// Port of `Assembler.BuildToSchematic.main`.
 ///
@@ -15,30 +13,61 @@ use cpu_simulator_rs::cpu::start_cpu_from_program;
 /// overwritten. That's true of the Java version too; I didn't invent or fix
 /// this, just preserved it. Worth deciding whether that's intentional
 /// before this file's contents matter to anything downstream.
+// fn main() {
+// 	let file_name = "src/Programs_V2_0/fib";
+//
+// 	let program = match build::build(&format!("{file_name}.as")) {
+// 		Ok(program) => program,
+// 		Err(e) => {
+// 			eprintln!("Build failed: {e}");
+// 			std::process::exit(1);
+// 		}
+// 	};
+//
+// 	if let Err(e) = write_to_pure_binary(file_name, &program) {
+// 		eprintln!("Failed to write binary output: {e}");
+// 		std::process::exit(1);
+// 	}
+//
+// 	if let Err(e) = write_to_ascii_binary(file_name, &program) {
+// 		eprintln!("Failed to write ascii binary output: {e}");
+// 		std::process::exit(1);
+// 	}
+//
+// 	start_cpu_from_program(&program);
+//
+// 	// Build::runBuildToSchem(file_name + ".bin");
+// }
+
+
+mod compiler {
+	pub mod lexer;
+	pub mod ast;
+	pub mod parser;
+	pub mod typecheck;
+	pub mod codegen;
+}
+
+use compiler::{codegen::Codegen, lexer::tokenize, parser::Parser, typecheck::check_program};
+use inkwell::context::Context;
+use std::fs;
+
 fn main() {
-	let file_name = "src/Programs_V2_0/fib";
+	let path = "./src/compiler/programs/fib.ecc";
+	let source = fs::read_to_string(path).expect("failed to read source file");
 
-	let program = match build::build(&format!("{file_name}.as")) {
-		Ok(program) => program,
-		Err(e) => {
-			eprintln!("Build failed: {e}");
-			std::process::exit(1);
-		}
-	};
+	let tokens = tokenize(&source);
+	let mut parser = Parser::new(tokens);
+	let mut program = parser.parse_program();
 
-	if let Err(e) = write_to_pure_binary(file_name, &program) {
-		eprintln!("Failed to write binary output: {e}");
-		std::process::exit(1);
-	}
+	check_program(&mut program);
 
-	if let Err(e) = write_to_ascii_binary(file_name, &program) {
-		eprintln!("Failed to write ascii binary output: {e}");
-		std::process::exit(1);
-	}
+	let context = Context::create();
+	let mut codegen = Codegen::new(&context, "my_module");
+	codegen.lower_program(&program);
 
-	start_cpu_from_program(&program);
-
-	// Build::runBuildToSchem(file_name + ".bin");
+	codegen.module.print_to_file("out.ll").expect("failed to write .ll file");
+	println!("wrote out.ll");
 }
 
 /// Port of `BuildToSchematic.writeToAsciiBinary`.

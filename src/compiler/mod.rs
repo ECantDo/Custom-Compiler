@@ -3,6 +3,7 @@ mod lexer;
 mod ast;
 pub mod parser;
 mod typecheck;
+mod codegen;
 
 #[test]
 fn test_parsing(){
