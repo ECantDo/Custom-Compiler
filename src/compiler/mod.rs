@@ -63,7 +63,7 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 
 	fs::create_dir_all(OUTPUT_DIR).expect("Error");
 	codegen.module.print_to_file(format!("{}/out.unoptimized.ll", OUTPUT_DIR)).unwrap();
-	optimize(&codegen.module, "default<O2>");
+	optimize(&codegen.module, "default<O3>");
 	codegen.module.print_to_file(format!("{}/out.ll", OUTPUT_DIR)).expect("failed to write .ll file");
 	println!("wrote out.ll");
 }

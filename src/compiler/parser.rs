@@ -38,9 +38,17 @@ impl Parser {
 
 	fn parse_expression(&mut self) -> Expr {
 		let expr = self.parse_binary(2);
+
 		if self.check(&TokenKind::Eq) {
 			self.advance();
 			let value = self.parse_expression();
+			return Expr::Assign { target: Box::new(expr), value: Box::new(value) };
+		}
+
+		if let Some(op) = compound_assign_op(self.peek()) {
+			self.advance();
+			let rhs = self.parse_expression();
+			let value = Expr::Binary { op, left: Box::new(expr.clone()), right: Box::new(rhs) };
 			return Expr::Assign { target: Box::new(expr), value: Box::new(value) };
 		}
 
@@ -378,4 +386,19 @@ fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>, line: usize) -> i6
 		}
 		other => panic!("const expressions only support literals, earlier consts, and + - & | ^ << >> — found {:?} at line {}", other, line),
 	}
+}
+
+
+fn compound_assign_op(kind: &TokenKind) -> Option<BinOp> {
+	use TokenKind::*;
+	Some(match kind {
+		PlusEq => BinOp::Add,
+		MinusEq => BinOp::Sub,
+		AmpEq => BinOp::BitAnd,
+		PipeEq => BinOp::BitOr,
+		CaretEq => BinOp::BitXor,
+		ShlEq => BinOp::Shl,
+		ShrEq => BinOp::Shr,
+		_ => return None,
+	})
 }
