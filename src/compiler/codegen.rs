@@ -1,4 +1,5 @@
 use crate::compiler::ast::*;
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -14,16 +15,21 @@ pub struct Codegen<'ctx> {
 	// name -> (param types, return type). Populated in pass 1 of lower_program,
 	// consumed by general function-call codegen. `None` return means void.
 	fn_sigs: HashMap<String, (Vec<Type>, Option<Type>)>,
+	build_mode: BuildMode,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum BuildMode { Dev, Release }
 
 struct FnScope<'ctx> {
 	allocas: HashMap<usize, (PointerValue<'ctx>, Type)>, // keyed by unique Stmt address, never collides
 	names: Vec<HashMap<String, usize>>,                   // scope stack: name -> alloca id
+	function: FunctionValue<'ctx>,
 }
 
 impl<'ctx> FnScope<'ctx> {
-	fn new() -> Self {
-		FnScope { allocas: HashMap::new(), names: vec![HashMap::new()] }
+	fn new(function: FunctionValue<'ctx>) -> Self {
+		FnScope { allocas: HashMap::new(), names: vec![HashMap::new()], function }
 	}
 	fn push(&mut self) { self.names.push(HashMap::new()); }
 	fn pop(&mut self) { self.names.pop(); }
@@ -43,12 +49,13 @@ impl<'ctx> FnScope<'ctx> {
 fn stmt_key(stmt: &Stmt) -> usize { stmt as *const Stmt as usize }
 
 impl<'ctx> Codegen<'ctx> {
-	pub fn new(context: &'ctx Context, module_name: &str) -> Self {
+	pub fn new(context: &'ctx Context, module_name: &str, build_mode: BuildMode) -> Self {
 		Codegen {
 			context,
 			module: context.create_module(module_name),
 			builder: context.create_builder(),
 			fn_sigs: HashMap::new(),
+			build_mode,
 		}
 	}
 
@@ -86,7 +93,8 @@ impl<'ctx> Codegen<'ctx> {
 					Some(rt) => self.llvm_basic_type(rt).fn_type(&param_types, false),
 					None => self.context.void_type().fn_type(&param_types, false),
 				};
-				self.module.add_function(name, fn_type, None);
+				let function = self.module.add_function(name, fn_type, None);
+				mark_null_pointer_valid(self.context, function);
 
 				let sig_param_types = params.iter().map(|p| p.ty.clone()).collect();
 				self.fn_sigs.insert(name.clone(), (sig_param_types, return_ty.clone()));
@@ -104,7 +112,7 @@ impl<'ctx> Codegen<'ctx> {
 		let entry = self.context.append_basic_block(function, "entry");
 		self.builder.position_at_end(entry);
 
-		let mut scope = FnScope::new();
+		let mut scope = FnScope::new(function);
 
 		// params: alloca + store, each param gets a synthetic id since it has
 		// no Stmt of its own — using the param's index is fine, guaranteed
@@ -348,6 +356,8 @@ impl<'ctx> Codegen<'ctx> {
 			Expr::Call { name, args } if name == "fetch" => {
 				assert_eq!(args.len(), 1, "fetch(addr) takes exactly one argument");
 				let (addr_val, _addr_ty) = self.lower_expr(&args[0], None, scope);
+				self.check_zero_address_allowed(addr_val, scope);
+				
 				let word_ty = self.context.i16_type();
 				let ptr_ty = self.context.ptr_type(AddressSpace::default());
 				let ptr = self.builder
@@ -355,6 +365,24 @@ impl<'ctx> Codegen<'ctx> {
 					.unwrap();
 				let loaded = self.builder.build_load(word_ty, ptr, "fetchval").unwrap();
 				(loaded, Type::I16)
+			}
+
+			Expr::Call { name, args } if name == "store" => {
+				assert_eq!(args.len(), 2, "store(addr, value) takes exactly two arguments");
+				let (addr_val, _addr_ty) = self.lower_expr(&args[0], None, scope);
+				self.check_zero_address_allowed(addr_val, scope);
+
+				let (value_val, _) = self.lower_expr(&args[1], Some(&Type::I16), scope);
+
+				let ptr_ty = self.context.ptr_type(AddressSpace::default());
+				let ptr = self.builder
+					.build_int_to_ptr(addr_val.into_int_value(), ptr_ty, "storeaddr")
+					.unwrap();
+
+				self.builder.build_store(ptr, value_val).unwrap();
+
+				// store doesn't produce a meaningful value; same "dummy I16(0)" convention
+				(self.context.i16_type().const_int(0, false).into(), Type::I16)
 			}
 
 			// General function calls - this is the path malloc/free will go
@@ -375,7 +403,7 @@ impl<'ctx> Codegen<'ctx> {
 				match return_ty {
 					Some(ret_ty) => {
 						let val = call.try_as_basic_value().unwrap_basic();
-							//.expect("function has a declared return type but produced no value");
+						//.expect("function has a declared return type but produced no value");
 						(val, ret_ty)
 					}
 					None => panic!(
@@ -411,6 +439,30 @@ impl<'ctx> Codegen<'ctx> {
 			}
 		}
 	}
+
+	fn check_zero_address_allowed(&mut self, addr_val: BasicValueEnum<'ctx>, scope: &FnScope<'ctx>) {
+		if self.build_mode != BuildMode::Dev { return; }
+
+		let fn_name = scope.function.get_name().to_str().unwrap();
+		if fn_name == "malloc" || fn_name == "free" { return; }
+
+		let i16_type = self.context.i16_type();
+		let is_zero = self.builder.build_int_compare(
+			IntPredicate::EQ, addr_val.into_int_value(), i16_type.const_int(0, false), "is_zero_addr",
+		).unwrap();
+
+		let trap_bb = self.context.append_basic_block(scope.function, "zero_addr_trap");
+		let cont_bb = self.context.append_basic_block(scope.function, "zero_addr_ok");
+		self.builder.build_conditional_branch(is_zero, trap_bb, cont_bb).unwrap();
+
+		self.builder.position_at_end(trap_bb);
+		let trap_intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.trap").unwrap();
+		let trap_fn = trap_intrinsic.get_declaration(&self.module, &[]).unwrap();
+		self.builder.build_call(trap_fn, &[], "").unwrap();
+		self.builder.build_unreachable().unwrap();
+
+		self.builder.position_at_end(cont_bb);
+	}
 }
 
 /// Recursively finds every `let` in a statement list, including inside
@@ -435,4 +487,11 @@ fn collect_lets(stmts: &[Stmt]) -> Vec<(usize, &str, Type)> {
 		}
 	}
 	out
+}
+
+
+fn mark_null_pointer_valid(context: &Context, function: FunctionValue) {
+	let kind_id = Attribute::get_named_enum_kind_id("null_pointer_is_valid");
+	let attr = context.create_enum_attribute(kind_id, 0);
+	function.add_attribute(AttributeLoc::Function, attr);
 }
