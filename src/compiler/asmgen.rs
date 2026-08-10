@@ -414,7 +414,11 @@ fn emit_phi_moves<'ctx>(
 						let const_val = as_constant_i64(incoming_val);
 
 						if let Some(v) = const_val {
-							out.push_str(&format!("\tli\t{v} {dest}\n"));
+							if v == 0 {
+								out.push_str(&format!("\tmv\tzero {dest}\n"));
+							} else {
+								out.push_str(&format!("\tli\t{v} {dest}\n"));
+							}
 						} else {
 							let src = resolve_operand(registers, &mut out, incoming_val);
 							if src != dest {
