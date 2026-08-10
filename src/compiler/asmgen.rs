@@ -116,6 +116,7 @@ fn match_opcode<'ctx>(
 			let rhs_reg = resolve_operand(registers, &mut out, rhs);
 
 			let then_bb = instruction.get_operand(2).unwrap().unwrap_block();
+			let else_bb = instruction.get_operand(1).unwrap().unwrap_block();
 
 			let branch_type = match icmp.get_icmp_predicate() {
 				Some(IntPredicate::EQ) => "beq",
@@ -135,6 +136,13 @@ fn match_opcode<'ctx>(
 
 			out.push_str(&format!("\t{branch_type}\t{lhs_reg} {rhs_reg} {fn_name}_{}\n",
 								  then_bb.get_name().to_str().unwrap()));
+
+			// The false path was previously left to "fall through" - only
+			// correct if else_bb happens to be the very next block in
+			// sequence, which was never actually checked. Always emit the
+			// jump; peephole_remove_redundant_jumps already strips it back
+			// out on the (common) case where it IS the next block anyway.
+			out.push_str(&format!("\tj\t{fn_name}_{}\n", else_bb.get_name().to_str().unwrap()));
 
 			out
 		}
@@ -183,21 +191,21 @@ fn match_opcode<'ctx>(
 			out
 		}
 
-		// InstructionOpcode::And => {
-		// 	let lhs = instruction.get_operand(0).unwrap().unwrap_value();
-		// 	let rhs = instruction.get_operand(1).unwrap().unwrap_value();
-		//
-		// 	let mut out = String::new();
-		//
-		// 	let lhs_reg = resolve_operand(registers, &mut out, lhs);
-		// 	let rhs_reg = resolve_operand(registers, &mut out, rhs);
-		//
-		// 	let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
-		//
-		// 	out.push_str(&format!("\tand\t{lhs_reg} {rhs_reg} {dest}\n"));
-		//
-		// 	out
-		// }
+		InstructionOpcode::And => {
+			let lhs = instruction.get_operand(0).unwrap().unwrap_value();
+			let rhs = instruction.get_operand(1).unwrap().unwrap_value();
+
+			let mut out = String::new();
+
+			let lhs_reg = resolve_operand(registers, &mut out, lhs);
+			let rhs_reg = resolve_operand(registers, &mut out, rhs);
+
+			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+
+			out.push_str(&format!("\tand\t{lhs_reg} {rhs_reg} {dest}\n"));
+
+			out
+		}
 
 		other => panic!("instruction not selected yet: {:?}", other),
 	}
@@ -281,7 +289,7 @@ fn resolve_operand<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, val: Basic
 		let reg = format!("t{}", regs.next);
 		regs.next += 1;
 		regs.assigned.insert(val, reg.clone());
-		out.push_str(&format!("\tli\t{reg}, {const_val}\n"));
+		out.push_str(&format!("\tli\t{const_val} {reg}\n"));
 		return reg;
 	}
 	regs.resolve(val)
@@ -313,10 +321,19 @@ fn emit_phi_moves<'ctx>(
 					if incoming_block == *current_block {
 						let dest = registers.get_or_assign(instr.as_any_value_enum().try_into().unwrap());
 
+						if is_undef(incoming_val) {
+							// This edge never actually supplies a real value for
+							// this phi (e.g. a loop-local variable merged at the
+							// loop header along the preheader edge, before the
+							// loop has run once). Nothing meaningful to move -
+							// dest is left whatever it already was.
+							continue;
+						}
+
 						let const_val = as_constant_i64(incoming_val);
 
 						if let Some(v) = const_val {
-							out.push_str(&format!("\tli\t{dest}, {v}\n"));
+							out.push_str(&format!("\tli\t{v} {dest}\n"));
 						} else {
 							let src = resolve_operand(registers, &mut out, incoming_val);
 							if src != dest {
@@ -392,19 +409,36 @@ fn resolve_address<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, addr: Basi
 /// covers plain int constants, null pointers, and non-null constant
 /// pointers (inttoptr(N)). Returns None for anything that isn't a
 /// compile-time constant.
-fn as_constant_i64(val: BasicValueEnum) -> Option<i64> {
+fn as_constant_i64(val: BasicValueEnum) -> Option<i64> {	match val {
+	// NOTE: is_const() is true for constant EXPRESSIONS too (e.g. a
+	// ptrtoint/mul chain folded by an optimization pass), not just plain
+	// integer literals — get_sign_extended_constant() only succeeds for
+	// the latter, so this must stay an `if let`, never a bare `.unwrap()`.
+	BasicValueEnum::IntValue(iv) if iv.is_const() => {
+		iv.get_sign_extended_constant()
+	}
+	BasicValueEnum::PointerValue(pv) if pv.is_null() => Some(0),
+	BasicValueEnum::PointerValue(pv) if pv.is_const() => {
+		let text = pv.print_to_string().to_string();
+		text.split("inttoptr (")
+			.nth(1)
+			.and_then(|s| s.split_whitespace().nth(1))
+			.and_then(|s| s.parse().ok())
+	}
+	_ => None,
+}
+}
+/// Whether a value is LLVM's `undef` — a value that's compile-time constant
+/// in the broad sense but has no defined bit pattern (nothing to move into
+/// a register). Distinct from a normal zero/null constant.
+fn is_undef(val: BasicValueEnum) -> bool {
 	match val {
-		BasicValueEnum::IntValue(iv) if iv.is_const() => {
-			Some(iv.get_sign_extended_constant().unwrap())
-		}
-		BasicValueEnum::PointerValue(pv) if pv.is_null() => Some(0),
-		BasicValueEnum::PointerValue(pv) if pv.is_const() => {
-			let text = pv.print_to_string().to_string();
-			text.split("inttoptr (")
-				.nth(1)
-				.and_then(|s| s.split_whitespace().nth(1))
-				.and_then(|s| s.parse().ok())
-		}
-		_ => None,
+		BasicValueEnum::IntValue(iv) => iv.is_undef(),
+		BasicValueEnum::PointerValue(pv) => pv.is_undef(),
+		BasicValueEnum::FloatValue(fv) => fv.is_undef(),
+		BasicValueEnum::ArrayValue(av) => av.is_undef(),
+		BasicValueEnum::StructValue(sv) => sv.is_undef(),
+		BasicValueEnum::VectorValue(vv) => vv.is_undef(),
+		_ => {panic!("Unsupported `is_undef` {val}")}
 	}
 }
