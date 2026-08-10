@@ -1,6 +1,6 @@
 use crate::cpu::RAM_SIZE;
 use inkwell::module::Module;
-use inkwell::values::{AnyValue, BasicValueEnum, InstructionOpcode, InstructionValue};
+use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionOpcode, InstructionValue};
 use inkwell::IntPredicate;
 use std::collections::HashMap;
 
@@ -79,11 +79,27 @@ fn match_opcode<'ctx>(
 			let mut out = String::new();
 
 			let lhs_reg = resolve_operand(registers, &mut out, lhs);
-			let rhs_reg = resolve_operand(registers, &mut out, rhs);
-
 			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
 
+
+			// println!("{instruction} | {lhs} | {rhs}");
+
+			if let BasicValueEnum::IntValue(rhs_iv) = rhs {
+				if rhs_iv.is_const() {
+					if let Some(imm) = rhs_iv.get_sign_extended_constant() {
+						if imm.abs() <= IMMEDIATE_MAX_VALUE_14 {
+							println!("WEEE");
+
+							out.push_str(&format!("\taddi\t{lhs_reg} {imm} {dest}\n"));
+							return out;
+						}
+					}
+				}
+			}
+
+			let rhs_reg = resolve_operand(registers, &mut out, rhs);
 			out.push_str(&format!("\tadd\t{lhs_reg} {rhs_reg} {dest}\n"));
+
 
 			out
 		}
@@ -246,6 +262,8 @@ pub fn build(module: &Module) -> String {
 			}
 		}
 
+		coalesce_phi_copies(function, &mut registers);
+
 		let blocks: Vec<_> = function.get_basic_block_iter().collect();
 		for (i, block) in blocks.iter().enumerate() {
 			let block_name = block.get_name().to_str().unwrap();
@@ -364,6 +382,93 @@ fn emit_phi_moves<'ctx>(
 	out
 }
 
+/// Counts how many times each SSA value is used as an operand anywhere in
+/// the function. A value can only be coalesced into a phi's register if
+/// the phi is its ONLY use — if something else still needs it, giving it
+/// away would just be wrong.
+fn count_operand_uses<'ctx>(function: FunctionValue<'ctx>) -> HashMap<BasicValueEnum<'ctx>, usize> {
+	let mut uses: HashMap<BasicValueEnum<'ctx>, usize> = HashMap::new();
+	for block in function.get_basic_block_iter() {
+		for instr in block.get_instructions() {
+			for i in 0..instr.get_num_operands() {
+				if let Some(Some(val)) = instr.get_operand(i).map(|op| op.value()) {
+					*uses.entry(val).or_insert(0) += 1;
+				}
+			}
+		}
+	}
+	uses
+}
+
+/// PASS 1.5: copy coalescing.
+///
+/// For every phi, look at the value flowing in from each predecessor. If
+/// that value is computed in the predecessor block, used nowhere else,
+/// AND doesn't itself depend on some OTHER phi in the same target block
+/// (which would make this part of a swap/rotation - unsafe to coalesce),
+/// bind it straight to the phi's register now. Codegen picks this up
+/// later via `get_or_assign` and the `mv` this would've needed collapses
+/// to a no-op.
+fn coalesce_phi_copies<'ctx>(function: FunctionValue<'ctx>, registers: &mut RegAlloc<'ctx>) {
+	let uses = count_operand_uses(function);
+
+	for block in function.get_basic_block_iter() {
+		let Some(terminator) = block.get_terminator() else { continue; };
+
+		let targets: Vec<_> = match terminator.get_opcode() {
+			InstructionOpcode::Br if terminator.get_num_operands() == 1 => {
+				vec![terminator.get_operand(0).unwrap().unwrap_block()]
+			}
+			InstructionOpcode::Br => vec![
+				terminator.get_operand(1).unwrap().unwrap_block(),
+				terminator.get_operand(2).unwrap().unwrap_block(),
+			],
+			_ => continue,
+		};
+
+		for target in targets {
+			let phis: Vec<InstructionValue> = target.get_instructions()
+				.take_while(|i| i.get_opcode() == InstructionOpcode::Phi)
+				.collect();
+
+			for &phi_instr in &phis {
+				let phi: inkwell::values::PhiValue = phi_instr.try_into().unwrap();
+
+				for i in 0..phi.count_incoming() {
+					let Some((incoming_val, incoming_block)) = phi.get_incoming(i) else { continue; };
+					if incoming_block != block { continue; }
+
+					// Only real instructions can be re-homed — constants get
+					// materialized fresh at each use anyway.
+					let BasicValueEnum::IntValue(iv) = incoming_val else { continue; };
+					let Some(def_instr) = iv.as_instruction() else { continue; };
+
+					if def_instr.get_parent() != Some(block) { continue; }
+					if uses.get(&incoming_val).copied().unwrap_or(0) != 1 { continue; }
+					if registers.assigned.contains_key(&incoming_val) { continue; }
+
+					// Safety check: does this value depend on a SIBLING phi
+					// (a different loop variable)? If so it's part of a
+					// rotation/swap and needs its own temp - skip it.
+					let depends_on_sibling_phi = (0..def_instr.get_num_operands()).any(|i| {
+						def_instr.get_operand(i)
+							.and_then(|op| op.value())
+							.map(|val| phis.iter().any(|&p| {
+								p != phi_instr && BasicValueEnum::try_from(p.as_any_value_enum()).unwrap() == val
+							}))
+							.unwrap_or(false)
+					});
+					if depends_on_sibling_phi { continue; }
+
+					let phi_val: BasicValueEnum = phi_instr.as_any_value_enum().try_into().unwrap();
+					let phi_reg = registers.resolve(phi_val);
+					registers.bind(incoming_val, &phi_reg);
+				}
+			}
+		}
+	}
+}
+
 /// Splits an address operand into (base register, constant offset).
 /// If it's just a plain value with no addition involved, offset is 0.
 /// If it's `add base, CONST` where CONST is a compile-time constant,
@@ -425,24 +530,25 @@ fn resolve_address<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, addr: Basi
 /// covers plain int constants, null pointers, and non-null constant
 /// pointers (inttoptr(N)). Returns None for anything that isn't a
 /// compile-time constant.
-fn as_constant_i64(val: BasicValueEnum) -> Option<i64> {	match val {
-	// NOTE: is_const() is true for constant EXPRESSIONS too (e.g. a
-	// ptrtoint/mul chain folded by an optimization pass), not just plain
-	// integer literals — get_sign_extended_constant() only succeeds for
-	// the latter, so this must stay an `if let`, never a bare `.unwrap()`.
-	BasicValueEnum::IntValue(iv) if iv.is_const() => {
-		iv.get_sign_extended_constant()
+fn as_constant_i64(val: BasicValueEnum) -> Option<i64> {
+	match val {
+		// NOTE: is_const() is true for constant EXPRESSIONS too (e.g. a
+		// ptrtoint/mul chain folded by an optimization pass), not just plain
+		// integer literals — get_sign_extended_constant() only succeeds for
+		// the latter, so this must stay an `if let`, never a bare `.unwrap()`.
+		BasicValueEnum::IntValue(iv) if iv.is_const() => {
+			iv.get_sign_extended_constant()
+		}
+		BasicValueEnum::PointerValue(pv) if pv.is_null() => Some(0),
+		BasicValueEnum::PointerValue(pv) if pv.is_const() => {
+			let text = pv.print_to_string().to_string();
+			text.split("inttoptr (")
+				.nth(1)
+				.and_then(|s| s.split_whitespace().nth(1))
+				.and_then(|s| s.parse().ok())
+		}
+		_ => None,
 	}
-	BasicValueEnum::PointerValue(pv) if pv.is_null() => Some(0),
-	BasicValueEnum::PointerValue(pv) if pv.is_const() => {
-		let text = pv.print_to_string().to_string();
-		text.split("inttoptr (")
-			.nth(1)
-			.and_then(|s| s.split_whitespace().nth(1))
-			.and_then(|s| s.parse().ok())
-	}
-	_ => None,
-}
 }
 /// Whether a value is LLVM's `undef` — a value that's compile-time constant
 /// in the broad sense but has no defined bit pattern (nothing to move into
@@ -455,7 +561,7 @@ fn is_undef(val: BasicValueEnum) -> bool {
 		BasicValueEnum::ArrayValue(av) => av.is_undef(),
 		BasicValueEnum::StructValue(sv) => sv.is_undef(),
 		BasicValueEnum::VectorValue(vv) => vv.is_undef(),
-		_ => {panic!("Unsupported `is_undef` {val}")}
+		_ => { panic!("Unsupported `is_undef` {val}") }
 	}
 }
 
