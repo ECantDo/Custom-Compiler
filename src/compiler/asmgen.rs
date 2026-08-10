@@ -1,6 +1,6 @@
 use crate::cpu::RAM_SIZE;
 use inkwell::module::Module;
-use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionOpcode, InstructionValue};
+use inkwell::values::{AnyValue, AsValueRef, BasicValueEnum, FunctionValue, InstructionOpcode, InstructionValue};
 use inkwell::IntPredicate;
 use std::collections::HashMap;
 
@@ -62,7 +62,7 @@ fn apply_immediate_operation<'ctx>(
 						eprintln!("warning: shift amount {imm} is less than 0, will truncate to {}", imm & 0xF)
 					}
 				}
-				if imm >= -(IMMEDIATE_MAX_VALUE_14 + 1) && imm <= IMMEDIATE_MAX_VALUE_14  {
+				if imm >= -(IMMEDIATE_MAX_VALUE_14 + 1) && imm <= IMMEDIATE_MAX_VALUE_14 {
 					out.push_str(&format!("\t{op_name}i\t{lhs_reg} {imm} {dest}\n"));
 					return out;
 				}
@@ -141,57 +141,60 @@ fn match_opcode<'ctx>(
 		}
 
 		InstructionOpcode::ICmp => {
-			let next = instruction.get_next_instruction();
-
-			let fuses = matches!(next.map(|n| n.get_opcode()), Some(InstructionOpcode::Br));
-			if !fuses {
-				panic!("icmp not directly followed by a conditional br — not selected yet");
+			if is_fused_into_next_br(instruction) {
+				String::new() // handled by Br below, same as today
+			} else {
+				materialize_icmp(instruction, registers)
 			}
-			String::new()
 		}
 
 		InstructionOpcode::Br => {
 			if instruction.get_num_operands() == 1 {
-				// Unconditional
 				let target = instruction.get_operand(0).unwrap().unwrap_block();
 				return format!("\tj\t{fn_name}_{}\n", target.get_name().to_str().unwrap());
 			}
 
-			let icmp = instruction.get_previous_instruction().unwrap();
-			if icmp.get_opcode() != InstructionOpcode::ICmp {
-				panic!("Conditional br without a preceding icmp");
-			}
-
-			let lhs = icmp.get_operand(0).unwrap().unwrap_value();
-			let rhs = icmp.get_operand(1).unwrap().unwrap_value();
-
-			let mut out = String::new();
-
-			let lhs_reg = resolve_operand(registers, &mut out, lhs);
-			let rhs_reg = resolve_operand(registers, &mut out, rhs);
-
+			let cond = instruction.get_operand(0).unwrap().unwrap_value();
 			let then_bb = instruction.get_operand(2).unwrap().unwrap_block();
 			let else_bb = instruction.get_operand(1).unwrap().unwrap_block();
 			let then_name = then_bb.get_name().to_str().unwrap().to_string();
 			let else_name = else_bb.get_name().to_str().unwrap().to_string();
 
-			let predicate = icmp.get_icmp_predicate()
-				.unwrap_or_else(|| panic!("Expected an icmp predicate, but found None"));
+			let mut out = String::new();
 
-			if next_block_name == Some(then_name.as_str()) {
-				// then_bb is the natural fallthrough - branch on the INVERTED
-				// condition straight to else_bb instead, and emit nothing for
-				// then_bb at all (it's reached just by falling through).
-				let mnemonic = branch_mnemonic(invert_predicate(predicate));
-				out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{else_name}\n"));
-			} else {
-				let mnemonic = branch_mnemonic(predicate);
-				out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{then_name}\n"));
-				if next_block_name != Some(else_name.as_str()) {
-					out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+			if let BasicValueEnum::IntValue(iv) = cond {
+				if let Some(cond_instr) = iv.as_instruction() {
+					if cond_instr.get_opcode() == InstructionOpcode::ICmp
+						&& instruction.get_previous_instruction() == Some(cond_instr)
+					{
+						// existing fused compare+branch path — unchanged
+						let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
+						let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
+						let lhs_reg = resolve_operand(registers, &mut out, lhs);
+						let rhs_reg = resolve_operand(registers, &mut out, rhs);
+						let predicate = cond_instr.get_icmp_predicate().unwrap();
+
+						if next_block_name == Some(then_name.as_str()) {
+							let mnemonic = branch_mnemonic(invert_predicate(predicate));
+							out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{else_name}\n"));
+						} else {
+							let mnemonic = branch_mnemonic(predicate);
+							out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{then_name}\n"));
+							if next_block_name != Some(else_name.as_str()) {
+								out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+							}
+						}
+						return out;
+					}
 				}
 			}
 
+			// General case: condition is a real 0/1 value already sitting in a register
+			let cond_reg = resolve_operand(registers, &mut out, cond);
+			out.push_str(&format!("\tbne\t{cond_reg} zero {fn_name}_{then_name}\n"));
+			if next_block_name != Some(else_name.as_str()) {
+				out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+			}
 			out
 		}
 
@@ -241,6 +244,30 @@ fn match_opcode<'ctx>(
 			out
 		}
 
+		InstructionOpcode::Select => {
+			let cond = instruction.get_operand(0).unwrap().unwrap_value();
+			let true_val = instruction.get_operand(1).unwrap().unwrap_value();
+			let false_val = instruction.get_operand(2).unwrap().unwrap_value();
+
+			let mut out = String::new();
+			let cond_reg = resolve_operand(registers, &mut out, cond);
+			let true_reg = resolve_operand(registers, &mut out, true_val);
+			let false_reg = resolve_operand(registers, &mut out, false_val);
+			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+
+			// Raw pointer as a cheap unique id for label naming - same trick as
+			// materialize_icmp, works regardless of the select's result type.
+			let id = instruction.as_value_ref() as usize;
+			let end_label = format!("select_end_{id}");
+
+			out.push_str(&format!("\tmv\t{false_reg} {dest}\n"));
+			out.push_str(&format!("\tbeq\t{cond_reg} zero {end_label}\n"));
+			out.push_str(&format!("\tmv\t{true_reg} {dest}\n"));
+			out.push_str(&format!("{end_label}:\n"));
+
+			out
+		}
+
 		other => panic!("instruction not selected yet: {:?}", other),
 	}
 }
@@ -263,7 +290,7 @@ pub fn build(module: &Module) -> String {
 	for function in module.get_functions() {
 		let name = function.get_name().to_str().unwrap();
 		let is_main = name == "main";
-		out.push_str(&format!("{name}:\n"));
+		out.push_str(&format!("\n{name}:\n"));
 
 		let mut registers = RegAlloc::new();
 		// Bind a0 ... regs
@@ -570,6 +597,39 @@ fn as_constant_i64(val: BasicValueEnum) -> Option<i64> {
 		_ => None,
 	}
 }
+
+fn is_fused_into_next_br(icmp: InstructionValue) -> bool {
+	matches!(
+        icmp.get_next_instruction().map(|n| n.get_opcode()),
+        Some(InstructionOpcode::Br)
+    )
+}
+
+fn materialize_icmp<'ctx>(icmp: InstructionValue<'ctx>, registers: &mut RegAlloc<'ctx>) -> String {
+	let lhs = icmp.get_operand(0).unwrap().unwrap_value();
+	let rhs = icmp.get_operand(1).unwrap().unwrap_value();
+	let predicate = icmp.get_icmp_predicate().unwrap();
+
+	let mut out = String::new();
+	let lhs_reg = resolve_operand(registers, &mut out, lhs);
+	let rhs_reg = resolve_operand(registers, &mut out, rhs);
+	let dest = registers.get_or_assign(icmp.as_any_value_enum().try_into().unwrap());
+
+	// unique-ish labels; instruction address works fine as a disambiguator
+	let id = icmp.as_any_value_enum().into_int_value().as_value_ref() as usize;
+	let true_label = format!("icmp_true_{id}");
+	let end_label = format!("icmp_end_{id}");
+
+	let mnemonic = branch_mnemonic(predicate);
+	out.push_str(&format!("\tli\t0 {dest}\n"));
+	out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {true_label}\n"));
+	out.push_str(&format!("\tj\t{end_label}\n"));
+	out.push_str(&format!("{true_label}:\n"));
+	out.push_str(&format!("\tli\t1 {dest}\n"));
+	out.push_str(&format!("{end_label}:\n"));
+	out
+}
+
 /// Whether a value is LLVM's `undef` — a value that's compile-time constant
 /// in the broad sense but has no defined bit pattern (nothing to move into
 /// a register). Distinct from a normal zero/null constant.
