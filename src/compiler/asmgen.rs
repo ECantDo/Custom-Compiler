@@ -43,6 +43,7 @@ fn match_opcode<'ctx>(
 	instruction: InstructionValue<'ctx>,
 	registers: &mut RegAlloc<'ctx>,
 	fn_name: &str,
+	next_block_name: Option<&str>,
 ) -> String {
 	match instruction.get_opcode() {
 		InstructionOpcode::Load => {
@@ -117,32 +118,25 @@ fn match_opcode<'ctx>(
 
 			let then_bb = instruction.get_operand(2).unwrap().unwrap_block();
 			let else_bb = instruction.get_operand(1).unwrap().unwrap_block();
+			let then_name = then_bb.get_name().to_str().unwrap().to_string();
+			let else_name = else_bb.get_name().to_str().unwrap().to_string();
 
-			let branch_type = match icmp.get_icmp_predicate() {
-				Some(IntPredicate::EQ) => "beq",
-				Some(IntPredicate::NE) => "bne",
-				Some(IntPredicate::SGT) => "bgt", // Signed Greater Than
-				Some(IntPredicate::SGE) => "bge", // Signed Greater Than or Equal
-				Some(IntPredicate::SLT) => "blt", // Signed Less Than
-				Some(IntPredicate::SLE) => "ble", // Signed Less Than or Equal
+			let predicate = icmp.get_icmp_predicate()
+				.unwrap_or_else(|| panic!("Expected an icmp predicate, but found None"));
 
-				Some(IntPredicate::UGT) => "bgtu", // Unsigned Higher
-				Some(IntPredicate::UGE) => "bgeu", // Unsigned Higher or Same
-				Some(IntPredicate::ULT) => "bltu", // Unsigned Lower
-				Some(IntPredicate::ULE) => "bleu", // Unsigned Lower or Same
-
-				None => panic!("Expected an icmp predicate, but found None"),
-			};
-
-			out.push_str(&format!("\t{branch_type}\t{lhs_reg} {rhs_reg} {fn_name}_{}\n",
-								  then_bb.get_name().to_str().unwrap()));
-
-			// The false path was previously left to "fall through" - only
-			// correct if else_bb happens to be the very next block in
-			// sequence, which was never actually checked. Always emit the
-			// jump; peephole_remove_redundant_jumps already strips it back
-			// out on the (common) case where it IS the next block anyway.
-			out.push_str(&format!("\tj\t{fn_name}_{}\n", else_bb.get_name().to_str().unwrap()));
+			if next_block_name == Some(then_name.as_str()) {
+				// then_bb is the natural fallthrough - branch on the INVERTED
+				// condition straight to else_bb instead, and emit nothing for
+				// then_bb at all (it's reached just by falling through).
+				let mnemonic = branch_mnemonic(invert_predicate(predicate));
+				out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{else_name}\n"));
+			} else {
+				let mnemonic = branch_mnemonic(predicate);
+				out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{then_name}\n"));
+				if next_block_name != Some(else_name.as_str()) {
+					out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+				}
+			}
 
 			out
 		}
@@ -236,20 +230,26 @@ pub fn build(module: &Module) -> String {
 			}
 		}
 
-		for block in function.get_basic_block_iter() {
+		let blocks: Vec<_> = function.get_basic_block_iter().collect();
+		for (i, block) in blocks.iter().enumerate() {
 			let block_name = block.get_name().to_str().unwrap();
 			if !block_name.is_empty() && block_name != "entry" {
 				out.push_str(&format!("{name}_{block_name}:\n"));
 			}
+
+			let next_block_name = blocks.get(i + 1)
+				.and_then(|b| b.get_name().to_str().ok())
+				.filter(|s| !s.is_empty())
+				.map(|s| s.to_string());
 
 			let instructions: Vec<InstructionValue> = block.get_instructions().collect();
 
 			for instruction in &instructions {
 				if instruction.get_opcode() == InstructionOpcode::Phi { continue; }
 				if instruction.is_terminator() {
-					out.push_str(&emit_phi_moves(*instruction, &block, &mut registers));
+					out.push_str(&emit_phi_moves(*instruction, block, &mut registers));
 				}
-				out.push_str(&match_opcode(*instruction, &mut registers, &name));
+				out.push_str(&match_opcode(*instruction, &mut registers, &name, next_block_name.as_deref()));
 			}
 		}
 	}
@@ -440,5 +440,38 @@ fn is_undef(val: BasicValueEnum) -> bool {
 		BasicValueEnum::StructValue(sv) => sv.is_undef(),
 		BasicValueEnum::VectorValue(vv) => vv.is_undef(),
 		_ => {panic!("Unsupported `is_undef` {val}")}
+	}
+}
+
+fn branch_mnemonic(predicate: IntPredicate) -> &'static str {
+	match predicate {
+		IntPredicate::EQ => "beq",
+		IntPredicate::NE => "bne",
+		IntPredicate::SGT => "bgt",  // Signed Greater Than
+		IntPredicate::SGE => "bge",  // Signed Greater Than or Equal
+		IntPredicate::SLT => "blt",  // Signed Less Than
+		IntPredicate::SLE => "ble",  // Signed Less Than or Equal
+		IntPredicate::UGT => "bgtu", // Unsigned Higher
+		IntPredicate::UGE => "bgeu", // Unsigned Higher or Same
+		IntPredicate::ULT => "bltu", // Unsigned Lower
+		IntPredicate::ULE => "bleu", // Unsigned Lower or Same
+	}
+}
+
+/// Logical negation of a predicate - used when the "then" block is the
+/// natural fallthrough, so we can branch directly to "else" on the opposite
+/// condition instead of emitting a dead extra jump.
+fn invert_predicate(predicate: IntPredicate) -> IntPredicate {
+	match predicate {
+		IntPredicate::EQ => IntPredicate::NE,
+		IntPredicate::NE => IntPredicate::EQ,
+		IntPredicate::SGT => IntPredicate::SLE,
+		IntPredicate::SGE => IntPredicate::SLT,
+		IntPredicate::SLT => IntPredicate::SGE,
+		IntPredicate::SLE => IntPredicate::SGT,
+		IntPredicate::UGT => IntPredicate::ULE,
+		IntPredicate::UGE => IntPredicate::ULT,
+		IntPredicate::ULT => IntPredicate::UGE,
+		IntPredicate::ULE => IntPredicate::UGT,
 	}
 }
