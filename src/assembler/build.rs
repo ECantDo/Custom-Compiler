@@ -116,7 +116,7 @@ pub fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Resu
 
 						// Jal just goes to the target location; not an offset
 						if instruction_values[0] & 0b11111 != 5 {
-							immediate_value -= line_number - 1;
+							immediate_value -= line_number + 1;
 						}
                     }
                     _ => {
