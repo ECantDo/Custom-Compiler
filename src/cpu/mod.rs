@@ -7,6 +7,8 @@ use crate::cpu::program_ram::ProgramRam;
 use crate::cpu::program_rom::ProgramMemory;
 use crate::cpu::registers::Registers;
 use std::io::{self, Write};
+use std::thread;
+use std::time::Duration;
 
 mod alu;
 mod program_counter;
@@ -146,9 +148,12 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 				panic!("Unknown function -> {}", info.opcode);
 			}
 		}
-		print!("{} : {} : S{}\r", cpu_parts.program_counter.get(), cpu_parts.registers, step);
+		print!("{:4} : {} : S{}\r", cpu_parts.program_counter.get(), cpu_parts.registers, step);
 		io::stdout().flush().unwrap();
 		step += 1;
+
+		let two_sec = time::Duration::new(1, 0);
+		thread::sleep(Duration::try_from(two_sec).unwrap());
 	}
 	println!("\n{}", cpu_parts.program_ram)
 }

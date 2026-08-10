@@ -1,3 +1,4 @@
+use crate::cpu::RAM_SIZE;
 use inkwell::module::Module;
 use inkwell::values::{AnyValue, BasicValueEnum, InstructionOpcode, InstructionValue};
 use inkwell::IntPredicate;
@@ -44,6 +45,7 @@ fn match_opcode<'ctx>(
 	registers: &mut RegAlloc<'ctx>,
 	fn_name: &str,
 	next_block_name: Option<&str>,
+	is_main: bool,
 ) -> String {
 	match instruction.get_opcode() {
 		InstructionOpcode::Load => {
@@ -147,7 +149,9 @@ fn match_opcode<'ctx>(
 				let val_reg = resolve_operand(registers, &mut out, val.unwrap_value());
 				out.push_str(&format!("\tmv\t{val_reg} a0\n"));
 			}
-			out.push_str("\tret\n");
+			// main returning isn't "return to a caller" - there is no caller.
+			// It's the program ending.
+			out.push_str(if is_main { "\thlt\n" } else { "\tret\n" });
 
 			out
 		}
@@ -208,9 +212,21 @@ fn match_opcode<'ctx>(
 
 pub fn build(module: &Module) -> String {
 	let mut out = String::new();
+	// Initialize stack pointer
+	out.push_str(&format!("li\t{} sp\n", RAM_SIZE - 1));
+
+	// Program entry point: jump straight to main regardless of what order
+	// functions happen to be emitted in. If main is emitted first, the
+	// peephole pass below strips this back out on its own (fallthrough and
+	// jump-to-immediately-next-label are equivalent), so no special-casing
+	// needed either way.
+	if module.get_function("main").is_some() {
+		out.push_str("j\tmain\n");
+	}
 
 	for function in module.get_functions() {
 		let name = function.get_name().to_str().unwrap();
+		let is_main = name == "main";
 		out.push_str(&format!("{name}:\n"));
 
 		let mut registers = RegAlloc::new();
@@ -249,7 +265,7 @@ pub fn build(module: &Module) -> String {
 				if instruction.is_terminator() {
 					out.push_str(&emit_phi_moves(*instruction, block, &mut registers));
 				}
-				out.push_str(&match_opcode(*instruction, &mut registers, &name, next_block_name.as_deref()));
+				out.push_str(&match_opcode(*instruction, &mut registers, &name, next_block_name.as_deref(), is_main));
 			}
 		}
 	}

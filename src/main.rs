@@ -1,7 +1,6 @@
 use cpu_simulator_rs::assembler::build;
-use cpu_simulator_rs::compiler::codegen::BuildMode;
-use cpu_simulator_rs::compiler::compile_to_asm;
 use cpu_simulator_rs::cpu::start_cpu_from_program;
+use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -16,13 +15,46 @@ use std::io::{BufWriter, Write};
 /// overwritten. That's true of the Java version too; I didn't invent or fix
 /// this, just preserved it. Worth deciding whether that's intentional
 /// before this file's contents matter to anything downstream.
+fn main() {
+	use cpu_simulator_rs::assembler::build;
+	use cpu_simulator_rs::cpu::start_cpu_from_program;
+
+	let file_name = "./compiled/fib.as";
+
+	let file_contents = fs::read_to_string(file_name).unwrap();
+
+	let program = match build::build(&file_contents) {
+		Ok(program) => program,
+		Err(e) => {
+			eprintln!("Build failed: {e}");
+			std::process::exit(1);
+		}
+	};
+
+	// if let Err(e) = write_to_pure_binary(file_name, &program) {
+	// 	eprintln!("Failed to write binary output: {e}");
+	// 	std::process::exit(1);
+	// }
+	//
+	// if let Err(e) = write_to_ascii_binary(file_name, &program) {
+	// 	eprintln!("Failed to write ascii binary output: {e}");
+	// 	std::process::exit(1);
+	// }
+
+	start_cpu_from_program(&program);
+
+	// Build::runBuildToSchem(file_name + ".bin");
+}
+
 // fn main() {
-// 	use cpu_simulator_rs::assembler::build;
-// 	use cpu_simulator_rs::cpu::start_cpu_from_program;
+// 	let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
 //
-// 	let file_name = "src/Programs_V2_0/fib";
+// 	let file_name = "fib";
 //
-// 	let program = match build::build(&format!("{file_name}.as")) {
+// 	let compiled_program = compile_to_asm(&format!("./src/compiler/programs/{file_name}.ecc"), mode).unwrap();
+//
+//
+// 	let program = match build::build(&compiled_program) {
 // 		Ok(program) => program,
 // 		Err(e) => {
 // 			eprintln!("Build failed: {e}");
@@ -41,38 +73,7 @@ use std::io::{BufWriter, Write};
 // 	}
 //
 // 	start_cpu_from_program(&program);
-//
-// 	// Build::runBuildToSchem(file_name + ".bin");
 // }
-
-fn main() {
-	let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
-
-	let file_name = "fib";
-
-	let compiled_program = compile_to_asm(&format!("./src/compiler/programs/{file_name}.ecc"), mode).unwrap();
-
-
-	let program = match build::build(&compiled_program) {
-		Ok(program) => program,
-		Err(e) => {
-			eprintln!("Build failed: {e}");
-			std::process::exit(1);
-		}
-	};
-
-	if let Err(e) = write_to_pure_binary(file_name, &program) {
-		eprintln!("Failed to write binary output: {e}");
-		std::process::exit(1);
-	}
-
-	if let Err(e) = write_to_ascii_binary(file_name, &program) {
-		eprintln!("Failed to write ascii binary output: {e}");
-		std::process::exit(1);
-	}
-
-	start_cpu_from_program(&program);
-}
 
 /// Port of `BuildToSchematic.writeToAsciiBinary`.
 fn write_to_ascii_binary(file: &str, program: &[u32]) -> std::io::Result<()> {

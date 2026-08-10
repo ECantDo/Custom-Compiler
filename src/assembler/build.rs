@@ -112,7 +112,12 @@ pub fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Resu
             if (current_position & immediate_position) != 0 {
                 match labels.get(part) {
                     Some(&label_line_number) if label_line_number >= 0 => {
-                        immediate_value = label_line_number - line_number - 1;
+                        immediate_value = label_line_number;
+
+						// Jal just goes to the target location; not an offset
+						if instruction_values[0] & 0b11111 != 5 {
+							immediate_value -= line_number - 1;
+						}
                     }
                     _ => {
                         immediate_value = parse_int(part)?;

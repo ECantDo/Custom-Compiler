@@ -112,6 +112,11 @@ pub fn parse_instruction(instruction: Instruction) -> InstructionInfo {
 		ii.immediate = ((instruction & SMALL_IMM_MASK) >> SMALL_IMM_SHIFT) as Word;
 	}
 
+	if is_full_imm {
+		ii.immediate = ((instruction & STAND_IMM_MASK) >> STAND_IMM_SHIFT) as Word;
+		ii.immediate |= ((instruction & LI_IMM_UPPER_MASK) >> LI_IMM_UPPER_SHIFT) as Word;
+	}
+
 	if (is_imm || !has_rd_reg) && (ii.immediate & IMM_SIGN_EXTEND_MASK != 0) && !is_full_imm {
 		ii.immediate |= 0xC000u16 as i16;
 	}

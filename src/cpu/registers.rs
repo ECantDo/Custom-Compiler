@@ -17,6 +17,9 @@ impl Registers {
 	const NUM: usize = 32; // Not in `mod` since this should not be changing; RAM and ROM can get away with more dynamic
 
 	pub fn set(&mut self, index: u8, value: Word) {
+		if index == 0 {
+			return; // Don't set 0
+		}
 		self.registers[index as usize] = value;
 	}
 
