@@ -215,8 +215,6 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, consts: &HashMap<String, (Type
 				None => Inferred::Concrete(Type::I16),
 			}
 		}
-
-		// _ => todo!(),
 	};
 
 	scratch.insert(node_key(expr), result.clone());
