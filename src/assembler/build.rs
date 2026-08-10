@@ -150,8 +150,8 @@ pub fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Resu
                 // RS2, 5 bits of byte 3, starting 3 bits in
                 operation_value |= (instruction_values[2] & 0b11111) << 18;
             }
-            5 | 25 => {
-                // Jump and link / Load Immediate
+            25 => {
+                // Load Immediate
                 // RD, first 5 bits of byte 2
                 operation_value |= (instruction_values[2] & 0b11111) << 8;
                 // bit 14 & 15 -> first 2 bits of byte 3
@@ -159,7 +159,30 @@ pub fn assemble(file_contents: &[String], labels: &HashMap<String, i32>) -> Resu
                 // Remaining imm bits starts 3rd bit into byte 3
                 operation_value |= (immediate_value & 0x3FFF) << 18;
             }
-            code @ (18 | 17 | 6 | 7) => {
+			5 => {
+				// Jump and link
+				// RD, first 5 bits of byte 2
+				operation_value |= (instruction_values[1] & 0b11111) << 8;
+				// immediate_value += 1;
+				// bit 14 & 15 -> first 2 bits of byte 3
+				operation_value |= ((immediate_value >> 14) & 0b11) << 16;
+				// Remaining imm bits starts 3rd bit into byte 3
+				operation_value |= (immediate_value & 0x3FFF) << 18;
+			}
+			6 => {
+				// Jump and link Register
+				// RD, first 5 bits of byte 2
+				operation_value |= (instruction_values[1] & 0b11111) << 8;
+
+				// RS1
+				operation_value |= (instruction_values[3] & 0b11111) << 13;
+
+				// immediate_value += 1;
+
+				// Remaining imm bits starts 3rd bit into byte 3
+				operation_value |= (immediate_value & 0x3FFF) << 18;
+			}
+			code @ (18 | 17 | 7) => {
                 // 18: Shifter - immediate needs to be only 4 bits long, then
                 // falls through to the same encoding as 17/6/7.
                 if code == 18 {

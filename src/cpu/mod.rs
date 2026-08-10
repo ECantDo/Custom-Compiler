@@ -152,8 +152,8 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 		io::stdout().flush().unwrap();
 		step += 1;
 
-		let two_sec = time::Duration::new(1, 0);
-		thread::sleep(Duration::try_from(two_sec).unwrap());
+		let sleep_time = time::Duration::milliseconds(200);
+		thread::sleep(Duration::try_from(sleep_time).unwrap());
 	}
 	println!("\n{}", cpu_parts.program_ram)
 }
