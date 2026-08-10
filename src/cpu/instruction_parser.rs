@@ -109,7 +109,7 @@ pub fn parse_instruction(instruction: Instruction) -> InstructionInfo {
 	}
 
 	if is_io {
-		ii.immediate = ((instruction & SMALL_IMM_MASK) >> STAND_IMM_SHIFT) as Word;
+		ii.immediate = ((instruction & SMALL_IMM_MASK) >> SMALL_IMM_SHIFT) as Word;
 	}
 
 	if (is_imm || !has_rd_reg) && (ii.immediate & IMM_SIGN_EXTEND_MASK != 0) && !is_full_imm {

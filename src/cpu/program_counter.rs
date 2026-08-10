@@ -25,9 +25,9 @@ impl ProgramCounter {
 		self.location as UnsignedWord
 	}
 
-	pub fn reset(&mut self) {
-		self.location = 0;
-	}
+	// pub fn reset(&mut self) {
+	// 	self.location = 0;
+	// }
 }
 
 impl Default for ProgramCounter {

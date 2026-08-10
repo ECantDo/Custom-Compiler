@@ -53,7 +53,7 @@ impl MinifbScreen {
 			},
 		)?;
 		// Cap polling between explicit update() calls instead of spinning.
-		window.limit_update_rate(Some(std::time::Duration::from_micros(16_600)));
+		window.set_target_fps(60);
 
 		let mut screen = Self {
 			rows,
@@ -75,9 +75,9 @@ impl MinifbScreen {
 	/// Whether the window is still open. Java relied on `EXIT_ON_CLOSE` to
 	/// kill the whole process on close; `minifb` has no such hook, so
 	/// callers should check this and react (e.g. stop the CPU loop).
-	pub fn is_open(&self) -> bool {
-		self.window.is_open()
-	}
+	// pub fn is_open(&self) -> bool {
+	// 	self.window.is_open()
+	// }
 
 	fn set_all(&mut self, color: bool) {
 		let color_value = if color { PIXEL_ON } else { PIXEL_OFF };

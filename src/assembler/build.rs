@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::process::Command;
 
 use super::error::AssemblerError;
@@ -32,8 +31,9 @@ pub fn run_build_to_schem(file_path: &str) {
 
 /// Port of `Build.build`. Reads a `.as` source file, assembles it, writes
 /// the `.bin` output next to it, and returns the assembled machine code.
-pub fn build(file_path: &str) -> Result<Vec<u32>, AssemblerError> {
-    let raw_contents = read_file(file_path)?;
+pub fn build(contents: &String) -> Result<Vec<u32>, AssemblerError> {
+	let raw_contents: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
+    // let raw_contents = read_file(file_path)?;
     let file_contents = format_file(&raw_contents);
     let labels = get_labels(&file_contents);
     let constants = get_constants(&file_contents)?;
@@ -47,17 +47,6 @@ pub fn build(file_path: &str) -> Result<Vec<u32>, AssemblerError> {
     }
 
     let instructions = assemble(&file_contents, &labels)?;
-
-    let bin_path = match file_path.rfind('.') {
-        Some(idx) => format!("{}.bin", &file_path[..idx]),
-        None => format!("{file_path}.bin"),
-    };
-
-    let mut writer = fs::File::create(&bin_path)?;
-    for instruction in &instructions {
-        writeln!(writer, "0b{:032b},", *instruction as u32)?;
-    }
-    println!("Wrote to output file: {bin_path}");
 
     Ok(instructions)
 }
@@ -342,7 +331,7 @@ pub fn format_file(file_contents: &[String]) -> Vec<String> {
 /// calls `System.exit(-1)`; kept that same fatal behavior here rather than
 /// threading it through `Result`, since a missing source file isn't
 /// something the rest of the pipeline can meaningfully recover from.
-fn read_file(file_path: &str) -> Result<Vec<String>, AssemblerError> {
+pub fn read_file(file_path: &str) -> Result<Vec<String>, AssemblerError> {
     match fs::read_to_string(file_path) {
         Ok(contents) => Ok(contents.lines().map(|s| s.to_string()).collect()),
         Err(e) => {

@@ -44,7 +44,7 @@ pub fn optimize(module: &inkwell::module::Module, opt_level: &str) {
 		.expect("failed to run optimization passes");
 }
 
-pub fn compile_to_ll(path: &str, mode: BuildMode) {
+pub fn compile_to_asm(path: &str, mode: BuildMode) -> Result<String, String> {
 	// let path = "./src/compiler/programs/fib.ecc";
 	// let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
 
@@ -67,11 +67,12 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 
 	if let Err(e) = codegen.module.verify() {
 		eprintln!("module is invalid: {}", e.to_string());
-		return;
+		return Err("Bad".to_string());
 	}
 
 	fs::create_dir_all(OUTPUT_DIR).expect("Error");
-	codegen.module.print_to_file(format!("{}/{module_name}.unoptimized.ll", OUTPUT_DIR)).unwrap();
+	// codegen.module.print_to_file(format!("{}/{module_name}.unoptimized.ll", OUTPUT_DIR)).unwrap();
+	// optimize(&codegen.module, "function(loop-mssa(loop-rotate)),default<Oz>");
 	optimize(&codegen.module, "default<Oz>");
 	codegen.module.print_to_file(format!("{}/{module_name}.ll", OUTPUT_DIR)).expect("failed to write .ll file");
 	println!("wrote {module_name}.ll");
@@ -84,6 +85,8 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 	let mut writer = BufWriter::new(File::create(path).expect("AHHH"));
 	writeln!(writer, "{}", built_asm).expect("PANICingngngng");
 	println!("wrote {module_name}.as");
+
+	Ok(built_asm)
 }
 
 #[test]

@@ -1,15 +1,10 @@
 use crate::compiler::ast::*;
 use std::collections::HashMap;
 
-pub type TypeMap = HashMap<usize, Type>;
-
 fn node_key(expr: &Expr) -> usize {
 	expr as *const Expr as usize
 }
 
-pub fn type_of<'a>(map: &'a TypeMap, expr: &Expr) -> Option<&'a Type> {
-	map.get(&node_key(expr))
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVar(usize);
@@ -103,7 +98,7 @@ impl TypeContext {
 }
 
 #[derive(Debug, Clone)]
-enum Inferred {
+pub enum Inferred {
 	Concrete(Type),
 	Var(TypeVar),
 }
@@ -221,7 +216,7 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, consts: &HashMap<String, (Type
 			}
 		}
 
-		_ => todo!(),
+		// _ => todo!(),
 	};
 
 	scratch.insert(node_key(expr), result.clone());
@@ -239,27 +234,6 @@ fn unify(a: &Inferred, b: &Inferred, ctx: &mut TypeContext) {
 	}
 }
 
-// TODO: See if I can remove this
-fn check_let(
-	name: &str, ty: &Option<Type>,
-	value: &Expr,
-	symbols: &mut SymbolTable,
-	consts: &HashMap<String, (Type, i64)>,
-	ctx: &mut TypeContext,
-	scratch: &mut HashMap<usize, Inferred>,
-	sigs: &FnSigs) {
-	let value_ty = infer_expr(value, symbols, consts, ctx, scratch, sigs);
-
-	let declared = match ty {
-		Some(explicit) => {
-			unify(&value_ty, &Inferred::Concrete(explicit.clone()), ctx);
-			Inferred::Concrete(explicit.clone())
-		}
-		None => value_ty,
-	};
-
-	symbols.declare(name, declared);
-}
 fn stmt_key(stmt: &Stmt) -> usize {
 	stmt as *const Stmt as usize
 }

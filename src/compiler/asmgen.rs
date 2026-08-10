@@ -183,6 +183,22 @@ fn match_opcode<'ctx>(
 			out
 		}
 
+		// InstructionOpcode::And => {
+		// 	let lhs = instruction.get_operand(0).unwrap().unwrap_value();
+		// 	let rhs = instruction.get_operand(1).unwrap().unwrap_value();
+		//
+		// 	let mut out = String::new();
+		//
+		// 	let lhs_reg = resolve_operand(registers, &mut out, lhs);
+		// 	let rhs_reg = resolve_operand(registers, &mut out, rhs);
+		//
+		// 	let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+		//
+		// 	out.push_str(&format!("\tand\t{lhs_reg} {rhs_reg} {dest}\n"));
+		//
+		// 	out
+		// }
+
 		other => panic!("instruction not selected yet: {:?}", other),
 	}
 }
@@ -230,7 +246,30 @@ pub fn build(module: &Module) -> String {
 		}
 	}
 
-	out
+	peephole_remove_redundant_jumps(&out)
+	// out
+}
+
+fn peephole_remove_redundant_jumps(asm: &str) -> String {
+	let lines: Vec<&str> = asm.lines().collect();
+	let mut out = Vec::new();
+
+	let mut i = 0;
+	while i < lines.len() {
+		let line = lines[i];
+		if let Some(target) = line.trim().strip_prefix("j\t") {
+			if let Some(next) = lines.get(i + 1) {
+				if next.trim_end() == format!("{}:", target.trim()) {
+					i += 1; // skip the jump, keep the label
+					continue;
+				}
+			}
+		}
+		out.push(line);
+		i += 1;
+	}
+
+	out.join("\n")
 }
 
 fn resolve_operand<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, val: BasicValueEnum<'ctx>) -> String {
