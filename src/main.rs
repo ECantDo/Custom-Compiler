@@ -51,7 +51,7 @@ fn main() {
 
 	let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
 
-	let file_name = "fib";
+	let file_name = "std_lib";
 
 	let compiled_program = compile_to_asm(&format!("./src/compiler/programs/{file_name}.ecc"), mode).unwrap();
 
@@ -79,7 +79,7 @@ fn main() {
 
 /// Port of `BuildToSchematic.writeToAsciiBinary`.
 fn write_to_ascii_binary(file: &str, program: &[u32]) -> std::io::Result<()> {
-	let path = format!("{file}.abin");
+	let path = format!("./compiled/bin/{file}.abin");
 	let mut writer = BufWriter::new(File::create(path)?);
 
 	for &instruction in program {
@@ -90,7 +90,7 @@ fn write_to_ascii_binary(file: &str, program: &[u32]) -> std::io::Result<()> {
 }
 
 fn write_to_pure_binary(file: &str, program: &[u32]) -> std::io::Result<()> {
-	let path = format!("{file}.bin");
+	let path = format!("./compiled/bin/{file}.bin");
 	let mut writer = BufWriter::new(File::create(path)?);
 
 	for &instruction in program {
