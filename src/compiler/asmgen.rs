@@ -40,6 +40,42 @@ impl<'ctx> RegAlloc<'ctx> {
 	}
 }
 
+fn apply_immediate_operation<'ctx>(
+	registers: &mut RegAlloc<'ctx>,
+	instruction: InstructionValue<'ctx>,
+	op_name: &str) -> String {
+	let lhs = instruction.get_operand(0).unwrap().unwrap_value();
+	let rhs = instruction.get_operand(1).unwrap().unwrap_value();
+
+	let mut out = String::new();
+
+	let lhs_reg = resolve_operand(registers, &mut out, lhs);
+	let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+
+	if let BasicValueEnum::IntValue(rhs_iv) = rhs {
+		if rhs_iv.is_const() {
+			if let Some(imm) = rhs_iv.get_sign_extended_constant() {
+				if op_name == "sl" || op_name == "sr" || op_name == "sra" {
+					if imm >= 16 {
+						eprintln!("warning: shift amount {imm} exceeds 4-bit shifter width, will truncate to {}", imm & 0xF)
+					} else if imm < 0 {
+						eprintln!("warning: shift amount {imm} is less than 0, will truncate to {}", imm & 0xF)
+					}
+				}
+				if imm >= -(IMMEDIATE_MAX_VALUE_14 + 1) && imm <= IMMEDIATE_MAX_VALUE_14  {
+					out.push_str(&format!("\t{op_name}i\t{lhs_reg} {imm} {dest}\n"));
+					return out;
+				}
+			}
+		}
+	}
+
+	let rhs_reg = resolve_operand(registers, &mut out, rhs);
+	out.push_str(&format!("\t{op_name}\t{lhs_reg} {rhs_reg} {dest}\n"));
+
+	out
+}
+
 fn match_opcode<'ctx>(
 	instruction: InstructionValue<'ctx>,
 	registers: &mut RegAlloc<'ctx>,
@@ -48,6 +84,38 @@ fn match_opcode<'ctx>(
 	is_main: bool,
 ) -> String {
 	match instruction.get_opcode() {
+		InstructionOpcode::Add => {
+			apply_immediate_operation(registers, instruction, "add")
+		}
+
+		InstructionOpcode::Sub => {
+			apply_immediate_operation(registers, instruction, "sub")
+		}
+
+		InstructionOpcode::Xor => {
+			apply_immediate_operation(registers, instruction, "xor")
+		}
+
+		InstructionOpcode::Or => {
+			apply_immediate_operation(registers, instruction, "or")
+		}
+
+		InstructionOpcode::And => {
+			apply_immediate_operation(registers, instruction, "and")
+		}
+
+		InstructionOpcode::Shl => {
+			apply_immediate_operation(registers, instruction, "sl")
+		}
+
+		InstructionOpcode::LShr => {
+			apply_immediate_operation(registers, instruction, "sr")
+		}
+
+		InstructionOpcode::AShr => {
+			apply_immediate_operation(registers, instruction, "sra")
+		}
+
 		InstructionOpcode::Load => {
 			let addr = instruction.get_operand(0).unwrap().unwrap_value();
 
@@ -69,38 +137,6 @@ fn match_opcode<'ctx>(
 			let (base_reg, offset) = resolve_address(registers, &mut out, addr);
 
 			out.push_str(&format!("\tstr\t{value_reg} {offset}({base_reg})\n"));
-			out
-		}
-
-		InstructionOpcode::Add => {
-			let lhs = instruction.get_operand(0).unwrap().unwrap_value();
-			let rhs = instruction.get_operand(1).unwrap().unwrap_value();
-
-			let mut out = String::new();
-
-			let lhs_reg = resolve_operand(registers, &mut out, lhs);
-			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
-
-
-			// println!("{instruction} | {lhs} | {rhs}");
-
-			if let BasicValueEnum::IntValue(rhs_iv) = rhs {
-				if rhs_iv.is_const() {
-					if let Some(imm) = rhs_iv.get_sign_extended_constant() {
-						if imm.abs() <= IMMEDIATE_MAX_VALUE_14 {
-							println!("WEEE");
-
-							out.push_str(&format!("\taddi\t{lhs_reg} {imm} {dest}\n"));
-							return out;
-						}
-					}
-				}
-			}
-
-			let rhs_reg = resolve_operand(registers, &mut out, rhs);
-			out.push_str(&format!("\tadd\t{lhs_reg} {rhs_reg} {dest}\n"));
-
-
 			out
 		}
 
@@ -202,22 +238,6 @@ fn match_opcode<'ctx>(
 			let mut out = String::new();
 			let src_reg = resolve_operand(registers, &mut out, src);
 			registers.assigned.insert(instruction.as_any_value_enum().try_into().unwrap(), src_reg);
-			out
-		}
-
-		InstructionOpcode::And => {
-			let lhs = instruction.get_operand(0).unwrap().unwrap_value();
-			let rhs = instruction.get_operand(1).unwrap().unwrap_value();
-
-			let mut out = String::new();
-
-			let lhs_reg = resolve_operand(registers, &mut out, lhs);
-			let rhs_reg = resolve_operand(registers, &mut out, rhs);
-
-			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
-
-			out.push_str(&format!("\tand\t{lhs_reg} {rhs_reg} {dest}\n"));
-
 			out
 		}
 
