@@ -17,6 +17,7 @@ pub mod parser;
 mod typecheck;
 pub mod codegen;
 mod asmgen;
+mod register_allocation;
 
 const OUTPUT_DIR: &str = "compiled";
 
