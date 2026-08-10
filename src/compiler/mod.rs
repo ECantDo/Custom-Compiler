@@ -7,13 +7,16 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::OptimizationLevel;
 use std::fs;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
 
 mod lexer;
 mod ast;
 pub mod parser;
 mod typecheck;
 pub mod codegen;
-mod code_gen;
+mod asmgen;
 
 const OUTPUT_DIR: &str = "compiled";
 
@@ -53,8 +56,13 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 
 	check_program(&mut program);
 
+	let module_name = &path[
+		path.rfind('/').unwrap_or(-1isize as usize) + 1
+			..path.rfind('.').unwrap_or(path.len())
+		];
+
 	let context = Context::create();
-	let mut codegen = Codegen::new(&context, "my_module", mode);
+	let mut codegen = Codegen::new(&context, module_name, mode);
 	codegen.lower_program(&program);
 
 	if let Err(e) = codegen.module.verify() {
@@ -63,10 +71,18 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 	}
 
 	fs::create_dir_all(OUTPUT_DIR).expect("Error");
-	codegen.module.print_to_file(format!("{}/out.unoptimized.ll", OUTPUT_DIR)).unwrap();
+	codegen.module.print_to_file(format!("{}/{module_name}.unoptimized.ll", OUTPUT_DIR)).unwrap();
 	optimize(&codegen.module, "default<Oz>");
-	codegen.module.print_to_file(format!("{}/out.ll", OUTPUT_DIR)).expect("failed to write .ll file");
+	codegen.module.print_to_file(format!("{}/{module_name}.ll", OUTPUT_DIR)).expect("failed to write .ll file");
 	println!("wrote out.ll");
+
+	let built_asm = asmgen::build(&codegen.module);
+	// println!("{}", built_asm.as_str());
+
+	let path = format!("{}/{module_name}.as", OUTPUT_DIR);
+
+	let mut writer = BufWriter::new(File::create(path).expect("AHHH"));
+	writeln!(writer, "{}", built_asm).expect("PAICINGINGNNG");
 }
 
 #[test]

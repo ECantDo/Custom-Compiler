@@ -3,6 +3,8 @@ use inkwell::values::{AnyValue, BasicValueEnum, InstructionOpcode, InstructionVa
 use inkwell::IntPredicate;
 use std::collections::HashMap;
 
+const IMMEDIATE_MAX_VALUE_14: i64 = 0x1FFF; // 13 bits
+
 struct RegAlloc<'ctx> {
 	next: usize,                                          // Index in to t0...t6 pool
 	assigned: HashMap<BasicValueEnum<'ctx>, String>,    // LLVM value -> register name
@@ -45,11 +47,13 @@ fn match_opcode<'ctx>(
 	match instruction.get_opcode() {
 		InstructionOpcode::Load => {
 			let addr = instruction.get_operand(0).unwrap().unwrap_value();
+
+
 			let mut out = String::new();
-			let addr_reg = resolve_operand(registers, &mut out, addr);
+			let (base_reg, offset) = resolve_address(registers, &mut out, addr);
 
 			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
-			out.push_str(&format!("\tlod\t{dest} 0({addr_reg})\n"));
+			out.push_str(&format!("\tlod\t{dest} {offset}({base_reg})\n"));
 			out
 		}
 
@@ -58,11 +62,10 @@ fn match_opcode<'ctx>(
 			let addr = instruction.get_operand(1).unwrap().unwrap_value();
 
 			let mut out = String::new();
-
 			let value_reg = resolve_operand(registers, &mut out, value);
-			let addr_reg = resolve_operand(registers, &mut out, addr);
+			let (base_reg, offset) = resolve_address(registers, &mut out, addr);
 
-			out.push_str(&format!("\tstr\t{value_reg} 0({addr_reg})\n"));
+			out.push_str(&format!("\tstr\t{value_reg} {offset}({base_reg})\n"));
 			out
 		}
 
@@ -227,7 +230,7 @@ pub fn build(module: &Module) -> String {
 		}
 	}
 
-	return out;
+	out
 }
 
 /// Resolves an operand to a register name — if it's a known value (param or
@@ -237,6 +240,10 @@ fn resolve_operand<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, val: Basic
 	match val {
 		BasicValueEnum::IntValue(iv) if iv.is_const() => {
 			let const_val = iv.get_sign_extended_constant().unwrap();
+			if const_val == 0 {
+				regs.assigned.insert(val, "zero".to_string());
+				return "zero".to_string();
+			}
 			let reg = format!("t{}", regs.next);
 			regs.next += 1;
 			regs.assigned.insert(val, reg.clone());
@@ -244,12 +251,9 @@ fn resolve_operand<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, val: Basic
 			reg
 		}
 		BasicValueEnum::PointerValue(pv) if pv.is_null() => {
-			// address 0 as a pointer — materialize it exactly like the int constant 0
-			let reg = format!("t{}", regs.next);
-			regs.next += 1;
-			regs.assigned.insert(val, reg.clone());
-			out.push_str(&format!("\tli\t{reg}, 0\n"));
-			reg
+			// address 0 as a pointer
+			regs.assigned.insert(val, "zero".to_string());
+			"zero".to_string()
 		}
 		BasicValueEnum::PointerValue(pv) if pv.is_const() => {
 			let text = pv.print_to_string().to_string();
@@ -306,4 +310,61 @@ fn emit_phi_moves<'ctx>(
 		}
 	}
 	out
+}
+
+/// Splits an address operand into (base register, constant offset).
+/// If it's just a plain value with no addition involved, offset is 0.
+/// If it's `add base, CONST` where CONST is a compile-time constant,
+/// folds CONST into the addressing mode instead of materializing it
+/// as a separate `li` + register.
+fn resolve_address<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, addr: BasicValueEnum<'ctx>) -> (String, i64) {
+	// Case 1: address is a plain constant int (e.g. a folded `first_free`)
+	if let BasicValueEnum::IntValue(iv) = addr {
+		if iv.is_const() {
+			let val = iv.get_sign_extended_constant().unwrap();
+			if val >= -(IMMEDIATE_MAX_VALUE_14 + 1) && val <= IMMEDIATE_MAX_VALUE_14 {
+				return ("zero".to_string(), val);
+			}
+		}
+	}
+
+	// Case 2: address is a constant pointer (null, or inttoptr(N))
+	if let BasicValueEnum::PointerValue(pv) = addr {
+		if pv.is_null() {
+			return ("zero".to_string(), 0);
+		}
+		if pv.is_const() {
+			let text = pv.print_to_string().to_string();
+			if let Some(val) = text.split("inttoptr (").nth(1)
+				.and_then(|s| s.split_whitespace().nth(1))
+				.and_then(|s| s.parse::<i64>().ok())
+			{
+				if val >= -(IMMEDIATE_MAX_VALUE_14 + 1) && val <= IMMEDIATE_MAX_VALUE_14 {
+					return ("zero".to_string(), val);
+				}
+			}
+		}
+	}
+
+	// Case 3: address is `base + CONST` (existing add-folding logic)
+	if let BasicValueEnum::IntValue(iv) = addr {
+		if let Some(instr) = iv.as_instruction() {
+			if instr.get_opcode() == InstructionOpcode::Add {
+				let lhs = instr.get_operand(0).unwrap().unwrap_value();
+				let rhs = instr.get_operand(1).unwrap().unwrap_value();
+				if let BasicValueEnum::IntValue(rhs_iv) = rhs {
+					if rhs_iv.is_const() {
+						let offset = rhs_iv.get_sign_extended_constant().unwrap();
+						if offset >= -(IMMEDIATE_MAX_VALUE_14 + 1) && offset <= IMMEDIATE_MAX_VALUE_14 {
+							let base_reg = resolve_operand(regs, out, lhs);
+							return (base_reg, offset);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: nothing folds, resolve the whole address as a normal value
+	(resolve_operand(regs, out, addr), 0)
 }
