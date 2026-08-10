@@ -125,15 +125,15 @@ fn match_opcode<'ctx>(
 				Some(IntPredicate::SLT) => "blt", // Signed Less Than
 				Some(IntPredicate::SLE) => "ble", // Signed Less Than or Equal
 
-				// Does not exist...
-				Some(IntPredicate::UGT) => "hi", // Unsigned Higher
-				Some(IntPredicate::UGE) => "hs", // Unsigned Higher or Same
-				Some(IntPredicate::ULT) => "lo", // Unsigned Lower
-				Some(IntPredicate::ULE) => "ls", // Unsigned Lower or Same
+				Some(IntPredicate::UGT) => "bgtu", // Unsigned Higher
+				Some(IntPredicate::UGE) => "bgeu", // Unsigned Higher or Same
+				Some(IntPredicate::ULT) => "bltu", // Unsigned Lower
+				Some(IntPredicate::ULE) => "bleu", // Unsigned Lower or Same
+
 				None => panic!("Expected an icmp predicate, but found None"),
 			};
 
-			out.push_str(&format!("\t{branch_type}\t{lhs_reg} {rhs_reg} {fn_name}_{}",
+			out.push_str(&format!("\t{branch_type}\t{lhs_reg} {rhs_reg} {fn_name}_{}\n",
 								  then_bb.get_name().to_str().unwrap()));
 
 			out
@@ -233,46 +233,19 @@ pub fn build(module: &Module) -> String {
 	out
 }
 
-/// Resolves an operand to a register name — if it's a known value (param or
-/// prior instruction result), returns its register. If it's a constant,
-/// emits an `li` into a fresh scratch register first, then returns that.
 fn resolve_operand<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, val: BasicValueEnum<'ctx>) -> String {
-	match val {
-		BasicValueEnum::IntValue(iv) if iv.is_const() => {
-			let const_val = iv.get_sign_extended_constant().unwrap();
-			if const_val == 0 {
-				regs.assigned.insert(val, "zero".to_string());
-				return "zero".to_string();
-			}
-			let reg = format!("t{}", regs.next);
-			regs.next += 1;
-			regs.assigned.insert(val, reg.clone());
-			out.push_str(&format!("\tli\t{reg}, {const_val}\n"));
-			reg
-		}
-		BasicValueEnum::PointerValue(pv) if pv.is_null() => {
-			// address 0 as a pointer
+	if let Some(const_val) = as_constant_i64(val) {
+		if const_val == 0 {
 			regs.assigned.insert(val, "zero".to_string());
-			"zero".to_string()
+			return "zero".to_string();
 		}
-		BasicValueEnum::PointerValue(pv) if pv.is_const() => {
-			let text = pv.print_to_string().to_string();
-			// text looks like: "ptr inttoptr (i16 1 to ptr)" — pull the integer out
-			let const_val: i64 = text
-				.split("inttoptr (")
-				.nth(1)
-				.and_then(|s| s.split_whitespace().nth(1))
-				.and_then(|s| s.parse().ok())
-				.unwrap_or_else(|| panic!("couldn't parse constant pointer text: {text}"));
-
-			let reg = format!("t{}", regs.next);
-			regs.next += 1;
-			regs.assigned.insert(val, reg.clone());
-			out.push_str(&format!("\tli\t{reg}, {const_val}\n"));
-			reg
-		}
-		_ => regs.resolve(val),
+		let reg = format!("t{}", regs.next);
+		regs.next += 1;
+		regs.assigned.insert(val, reg.clone());
+		out.push_str(&format!("\tli\t{reg}, {const_val}\n"));
+		return reg;
 	}
+	regs.resolve(val)
 }
 
 fn emit_phi_moves<'ctx>(
@@ -285,10 +258,10 @@ fn emit_phi_moves<'ctx>(
 			vec![terminator.get_operand(0).unwrap().unwrap_block()]
 		}
 		InstructionOpcode::Br => vec![
-			terminator.get_operand(1).unwrap().unwrap_block(), // false target
-			terminator.get_operand(2).unwrap().unwrap_block(), // true target
+			terminator.get_operand(1).unwrap().unwrap_block(),
+			terminator.get_operand(2).unwrap().unwrap_block(),
 		],
-		_ => return String::new(), // Return has no successors, nothing to do
+		_ => return String::new(),
 	};
 
 	let mut out = String::new();
@@ -300,9 +273,16 @@ fn emit_phi_moves<'ctx>(
 				if let Some((incoming_val, incoming_block)) = phi.get_incoming(i) {
 					if incoming_block == *current_block {
 						let dest = registers.get_or_assign(instr.as_any_value_enum().try_into().unwrap());
-						let src = resolve_operand(registers, &mut out, incoming_val);
-						if src != dest {
-							out.push_str(&format!("\tmv\t{src} {dest}\n"));
+
+						let const_val = as_constant_i64(incoming_val);
+
+						if let Some(v) = const_val {
+							out.push_str(&format!("\tli\t{dest}, {v}\n"));
+						} else {
+							let src = resolve_operand(registers, &mut out, incoming_val);
+							if src != dest {
+								out.push_str(&format!("\tmv\t{src} {dest}\n"));
+							}
 						}
 					}
 				}
@@ -367,4 +347,25 @@ fn resolve_address<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, addr: Basi
 
 	// Fallback: nothing folds, resolve the whole address as a normal value
 	(resolve_operand(regs, out, addr), 0)
+}
+
+/// Returns the constant integer value of a BasicValueEnum, if it IS one —
+/// covers plain int constants, null pointers, and non-null constant
+/// pointers (inttoptr(N)). Returns None for anything that isn't a
+/// compile-time constant.
+fn as_constant_i64(val: BasicValueEnum) -> Option<i64> {
+	match val {
+		BasicValueEnum::IntValue(iv) if iv.is_const() => {
+			Some(iv.get_sign_extended_constant().unwrap())
+		}
+		BasicValueEnum::PointerValue(pv) if pv.is_null() => Some(0),
+		BasicValueEnum::PointerValue(pv) if pv.is_const() => {
+			let text = pv.print_to_string().to_string();
+			text.split("inttoptr (")
+				.nth(1)
+				.and_then(|s| s.split_whitespace().nth(1))
+				.and_then(|s| s.parse().ok())
+		}
+		_ => None,
+	}
 }

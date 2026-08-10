@@ -1,7 +1,9 @@
+//@formatter:off
 use cpu_simulator_rs::compiler::codegen::BuildMode;
 use cpu_simulator_rs::compiler::compile_to_ll;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+//@formatter:on
 
 /// Port of `Assembler.BuildToSchematic.main`.
 ///
@@ -15,6 +17,9 @@ use std::io::{BufWriter, Write};
 /// this, just preserved it. Worth deciding whether that's intentional
 /// before this file's contents matter to anything downstream.
 // fn main() {
+// 	use cpu_simulator_rs::assembler::build;
+// 	use cpu_simulator_rs::cpu::start_cpu_from_program;
+//
 // 	let file_name = "src/Programs_V2_0/fib";
 //
 // 	let program = match build::build(&format!("{file_name}.as")) {

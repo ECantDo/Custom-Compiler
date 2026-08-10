@@ -74,7 +74,7 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 	codegen.module.print_to_file(format!("{}/{module_name}.unoptimized.ll", OUTPUT_DIR)).unwrap();
 	optimize(&codegen.module, "default<Oz>");
 	codegen.module.print_to_file(format!("{}/{module_name}.ll", OUTPUT_DIR)).expect("failed to write .ll file");
-	println!("wrote out.ll");
+	println!("wrote {module_name}.ll");
 
 	let built_asm = asmgen::build(&codegen.module);
 	// println!("{}", built_asm.as_str());
@@ -82,7 +82,8 @@ pub fn compile_to_ll(path: &str, mode: BuildMode) {
 	let path = format!("{}/{module_name}.as", OUTPUT_DIR);
 
 	let mut writer = BufWriter::new(File::create(path).expect("AHHH"));
-	writeln!(writer, "{}", built_asm).expect("PAICINGINGNNG");
+	writeln!(writer, "{}", built_asm).expect("PANICingngngng");
+	println!("wrote {module_name}.as");
 }
 
 #[test]

@@ -1,3 +1,6 @@
 /target
 *.bin
+*.ll
+*.ecc
+*.as
 */Programs_V2_0/
