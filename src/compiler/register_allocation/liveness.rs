@@ -1,5 +1,5 @@
 use inkwell::basic_block::BasicBlock;
-use inkwell::values::{BasicValueEnum, FunctionValue, InstructionOpcode, InstructionValue};
+use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionOpcode, InstructionValue};
 use std::collections::{HashMap, HashSet};
 
 pub struct LivenessInfo<'ctx> {
@@ -94,12 +94,49 @@ fn compute_succ<'ctx>(instr: InstructionValue<'ctx>) -> SuccEntry<'ctx> {
 		}
 	}
 }
+struct DefEntry<'ctx> {
+	uses: HashSet<BasicValueEnum<'ctx>>,
+	def: Option<BasicValueEnum<'ctx>>,
+}
 
-pub fn analyze<'ctx>(function: FunctionValue<'ctx>) -> LivenessInfo<'ctx> {
-	let mut succ_table: Vec<SuccEntry> = Vec::new();
+fn compute_def<'ctx>(instr: InstructionValue<'ctx>) -> DefEntry<'ctx> {
+	let mut uses = HashSet::new();
+
+	if instr.get_opcode() != InstructionOpcode::Phi {
+		for i in 0..instr.get_num_operands() {
+			if let Some(operand) = instr.get_operand(i) {
+				if let Some(val) = operand.value() {
+					uses.insert(val);
+				}
+			}
+		}
+	}
+
+	let def: Option<BasicValueEnum<'ctx>> = if instr.get_type().is_void_type() {
+		None
+	} else {
+		Some(instr.as_any_value_enum().try_into().unwrap())
+	};
+
+	DefEntry { uses, def }
+}
+
+
+fn compute_liveness<'ctx>(function: FunctionValue<'ctx>) -> LivenessInfo<'ctx> {
+	// Tables :3
+	let mut succ_table: HashMap<InstructionValue<'ctx>, SuccEntry<'ctx>> = HashMap::new();
+	let mut def_table: HashMap<InstructionValue<'ctx>, DefEntry<'ctx>> = HashMap::new();
+
+
 	let mut liveness_info = LivenessInfo::default();
 
-
+	// Step 1. Populate `use`, `def`, and `succ`
+	for block in function.get_basic_block_iter() {
+		for instruction in block.get_instructions() {
+			succ_table.insert(instruction, compute_succ(instruction));
+			def_table.insert(instruction, compute_def(instruction));
+		}
+	}
 
 	liveness_info
 }
