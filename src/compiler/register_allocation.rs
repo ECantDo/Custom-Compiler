@@ -1,13 +1,13 @@
-use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionValue};
-use std::collections::{HashMap, HashSet};
-
 mod liveness;
+mod graph;
 
-use liveness::InstructionLiveness;
+use graph::Graph;
+use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionValue};
+
 
 pub fn initialize_register_allocation<'ctx>(function: FunctionValue<'ctx>) {
 	let liveness = liveness::compute_liveness(function);
-	let graph = build_interference_graph(function, &liveness);
+	let graph = Graph::build_interference_graph(function, &liveness);
 }
 
 /// Same "does this instruction produce a usable value" check as
@@ -22,24 +22,3 @@ fn instruction_def<'ctx>(instr: InstructionValue<'ctx>) -> Option<BasicValueEnum
 	}
 }
 
-fn build_interference_graph<'ctx>(
-	function: FunctionValue<'ctx>,
-	liveness: &InstructionLiveness<'ctx>,
-) -> HashMap<BasicValueEnum<'ctx>, HashSet<BasicValueEnum<'ctx>>> {
-	let mut graph: HashMap<BasicValueEnum<'ctx>, HashSet<BasicValueEnum<'ctx>>> = HashMap::new();
-
-	for block in function.get_basic_block_iter() {
-		for instr in block.get_instructions() {
-			let Some(def_val) = instruction_def(instr) else { continue; };
-			let Some(live_out) = liveness.live_out.get(&instr) else { continue; };
-
-			for &other in live_out {
-				if other == def_val { continue; }
-				graph.entry(def_val).or_default().insert(other);
-				graph.entry(other).or_default().insert(def_val);
-			}
-		}
-	}
-
-	graph
-}
