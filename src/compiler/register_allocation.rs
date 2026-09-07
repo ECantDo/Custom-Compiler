@@ -1,13 +1,21 @@
 mod liveness;
 mod graph;
+pub mod config;
 
+use config::RegisterConfig;
 use graph::Graph;
 use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionValue};
 
 
-pub fn initialize_register_allocation<'ctx>(function: FunctionValue<'ctx>) {
+pub fn initialize_register_allocation<'ctx>(
+	function: FunctionValue<'ctx>,
+	target: &RegisterConfig,
+) {
 	let liveness = liveness::compute_liveness(function);
 	let graph = Graph::build_interference_graph(function, &liveness);
+
+	// TODO: colour `graph` with `target.num_colors()` registers, drawn from
+	// `target.allocatable()` in order.
 }
 
 /// Same "does this instruction produce a usable value" check as
