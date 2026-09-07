@@ -114,6 +114,37 @@ fn apply_immediate_operation<'ctx>(
 	out
 }
 
+/// Emit the test for a conditional `br` as a single branch to `target`.
+///
+/// `taken_on_then` picks which edge the branch selects: `true` means the
+/// branch is taken exactly when the THEN edge should be followed, `false`
+/// means it is taken when the ELSE edge should be followed (the predicate is
+/// inverted for that case).
+fn emit_cond_branch<'ctx>(
+	registers: &mut RegAlloc<'ctx>,
+	out: &mut String,
+	fused: Option<InstructionValue<'ctx>>,
+	cond: BasicValueEnum<'ctx>,
+	target: &str,
+	taken_on_then: bool,
+) {
+	if let Some(cond_instr) = fused {
+		let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
+		let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
+		let lhs_reg = resolve_operand(registers, out, lhs);
+		let rhs_reg = resolve_operand(registers, out, rhs);
+		let predicate = cond_instr.get_icmp_predicate().unwrap();
+		let predicate = if taken_on_then { predicate } else { invert_predicate(predicate) };
+		out.push_str(&format!("\t{}\t{lhs_reg} {rhs_reg} {target}\n", branch_mnemonic(predicate)));
+	} else {
+		// The condition is a materialised 0/1 value: take the branch when it
+		// is non-zero (THEN) or zero (ELSE).
+		let cond_reg = resolve_operand(registers, out, cond);
+		let mnemonic = if taken_on_then { "bne" } else { "beq" };
+		out.push_str(&format!("\t{mnemonic}\t{cond_reg} zero {target}\n"));
+	}
+}
+
 fn match_opcode<'ctx>(
 	instruction: InstructionValue<'ctx>,
 	registers: &mut RegAlloc<'ctx>,
@@ -225,38 +256,46 @@ fn match_opcode<'ctx>(
 				_ => None,
 			};
 
-			// No phi copies on either edge: keep the original fall-through-aware form.
+			let then_label = format!("{fn_name}_{then_name}");
+			let else_label = format!("{fn_name}_{else_name}");
+
+			// No phi copies on either edge: a single conditional branch plus at
+			// most one fall-through jump.
 			if then_moves.is_empty() && else_moves.is_empty() {
-				if let Some(cond_instr) = fused {
-					let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
-					let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
-					let lhs_reg = resolve_operand(registers, &mut out, lhs);
-					let rhs_reg = resolve_operand(registers, &mut out, rhs);
-					let predicate = cond_instr.get_icmp_predicate().unwrap();
-
-					if next_block_name == Some(then_name.as_str()) {
-						let mnemonic = branch_mnemonic(invert_predicate(predicate));
-						out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{else_name}\n"));
-					} else {
-						let mnemonic = branch_mnemonic(predicate);
-						out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{then_name}\n"));
-						if next_block_name != Some(else_name.as_str()) {
-							out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
-						}
+				if next_block_name == Some(then_name.as_str()) {
+					emit_cond_branch(registers, &mut out, fused, cond, &else_label, false);
+				} else {
+					emit_cond_branch(registers, &mut out, fused, cond, &then_label, true);
+					if next_block_name != Some(else_name.as_str()) {
+						out.push_str(&format!("\tj\t{else_label}\n"));
 					}
-					return out;
-				}
-
-				let cond_reg = resolve_operand(registers, &mut out, cond);
-				out.push_str(&format!("\tbne\t{cond_reg} zero {fn_name}_{then_name}\n"));
-				if next_block_name != Some(else_name.as_str()) {
-					out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
 				}
 				return out;
 			}
 
-			// At least one edge carries phi copies. Emit a trampoline so each
-			// edge's copies run only when that edge is taken:
+			// Only one edge carries copies: branch straight to the *other*
+			// block, then fall through this edge's copies into its block. The
+			// copies sit after the branch, so they run only when this edge is
+			// taken - and can't clobber the branch operands.
+			if else_moves.is_empty() {
+				emit_cond_branch(registers, &mut out, fused, cond, &else_label, false);
+				out.push_str(&then_moves);
+				if next_block_name != Some(then_name.as_str()) {
+					out.push_str(&format!("\tj\t{then_label}\n"));
+				}
+				return out;
+			}
+			if then_moves.is_empty() {
+				emit_cond_branch(registers, &mut out, fused, cond, &then_label, true);
+				out.push_str(&else_moves);
+				if next_block_name != Some(else_name.as_str()) {
+					out.push_str(&format!("\tj\t{else_label}\n"));
+				}
+				return out;
+			}
+
+			// Both edges carry copies. Emit a trampoline so each edge's copies
+			// run only when that edge is taken:
 			//
 			//     <test>  branch to L_then when the THEN condition holds
 			//     <else edge copies>
@@ -265,26 +304,14 @@ fn match_opcode<'ctx>(
 			//     <then edge copies>
 			//     j then          (dropped when `then` is the next block)
 			let id = instruction.as_value_ref() as usize;
-			let then_label = format!("{fn_name}_br{id}_then");
-
-			if let Some(cond_instr) = fused {
-				let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
-				let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
-				let lhs_reg = resolve_operand(registers, &mut out, lhs);
-				let rhs_reg = resolve_operand(registers, &mut out, rhs);
-				let mnemonic = branch_mnemonic(cond_instr.get_icmp_predicate().unwrap());
-				out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {then_label}\n"));
-			} else {
-				let cond_reg = resolve_operand(registers, &mut out, cond);
-				out.push_str(&format!("\tbne\t{cond_reg} zero {then_label}\n"));
-			}
-
+			let trampoline = format!("{fn_name}_br{id}_then");
+			emit_cond_branch(registers, &mut out, fused, cond, &trampoline, true);
 			out.push_str(&else_moves);
-			out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
-			out.push_str(&format!("{then_label}:\n"));
+			out.push_str(&format!("\tj\t{else_label}\n"));
+			out.push_str(&format!("{trampoline}:\n"));
 			out.push_str(&then_moves);
 			if next_block_name != Some(then_name.as_str()) {
-				out.push_str(&format!("\tj\t{fn_name}_{then_name}\n"));
+				out.push_str(&format!("\tj\t{then_label}\n"));
 			}
 			out
 		}
@@ -378,7 +405,6 @@ fn match_opcode<'ctx>(
 pub fn build(module: &Module) -> String {
 	let mut out = String::new();
 	// Initialize stack pointer
-	out.push_str(&format!("li\t{} sp\n", RAM_SIZE - 1));
 
 	// Program entry point: jump straight to main regardless of what order
 	// functions happen to be emitted in. If main is emitted first, the
@@ -386,6 +412,7 @@ pub fn build(module: &Module) -> String {
 	// jump-to-immediately-next-label are equivalent), so no special-casing
 	// needed either way.
 	if module.get_function("main").is_some() {
+		out.push_str(&format!("li\t{} sp\n", RAM_SIZE - 1));
 		out.push_str("j\tmain\n");
 	}
 
@@ -832,14 +859,27 @@ mod tests {
 		assert_well_formed(&asm);
 
 		// malloc's entry block ends in a conditional branch whose `then`
-		// successor (common.ret) has a phi. The copy for that edge must sit
-		// after the branch, behind its own label - never before it, where the
-		// fall-through path would run it too.
+		// successor (common.ret) takes the constant 1 through a phi. That copy
+		// must sit *after* the branch - on the edge - never hoisted above it
+		// where the fall-through path to `if.end` would run it too.
 		let malloc = asm.split("\nmalloc:").nth(1).expect("malloc emitted");
 		let malloc = malloc.split("\nfree:").next().unwrap();
+
+		let pre_branch: Vec<&str> = malloc
+			.lines()
+			.map(str::trim)
+			.take_while(|l| {
+				let m = l.split_whitespace().next().unwrap_or("");
+				!(m == "j" || (m.starts_with('b') && m != "break"))
+			})
+			.collect();
 		assert!(
-			malloc.contains("_then:"),
-			"expected an edge trampoline label in malloc:\n{malloc}"
+			!pre_branch.iter().any(|l| l.starts_with("li\t1 ")),
+			"phi constant was hoisted above the branch: {pre_branch:?}"
+		);
+		assert!(
+			malloc.lines().any(|l| l.trim() == "li\t1 s0" || l.trim().starts_with("li\t1 ")),
+			"expected the phi constant `1` to be materialised somewhere in malloc:\n{malloc}"
 		);
 	}
 }
