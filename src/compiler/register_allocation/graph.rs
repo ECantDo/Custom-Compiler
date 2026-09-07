@@ -1,5 +1,5 @@
 use crate::compiler::register_allocation::config::RegisterConfig;
-use crate::compiler::register_allocation::instruction_def;
+use crate::compiler::register_allocation::{instruction_def, is_register_value};
 use crate::compiler::register_allocation::liveness::InstructionLiveness;
 use inkwell::values::{BasicValueEnum, FunctionValue};
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,10 @@ impl<'ctx> Graph<'ctx> {
 
 				for &other in live_out {
 					if other == def_val { continue; }
+					// Constants and parameters flow through the liveness sets
+					// but never get a colour: constants are rematerialised at
+					// each use, parameters live in their argument registers.
+					if !is_register_value(other) { continue; }
 					add_node(&mut links, &mut order, def_val);
 					add_node(&mut links, &mut order, other);
 					links.get_mut(&def_val).unwrap().insert(other);

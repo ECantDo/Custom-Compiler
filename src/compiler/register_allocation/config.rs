@@ -37,13 +37,17 @@ pub struct RegisterInfo {
 	pub is_reserved: bool,
 	pub is_arg: bool,
 	pub is_ret: bool,
+	/// Kept out of the allocatable pool, but codegen may use it as a
+	/// short-lived temporary (materialising constants, breaking parallel-copy
+	/// cycles). Its value never has to survive a single instruction.
+	pub is_scratch: bool,
 	pub save: Option<SaveClass>,
 }
 
 impl RegisterInfo {
 	/// A register the graph-colouring allocator may assign to a value.
 	pub fn is_allocatable(&self) -> bool {
-		!self.is_zero && !self.is_reserved && self.save.is_some()
+		!self.is_zero && !self.is_reserved && !self.is_scratch && self.save.is_some()
 	}
 }
 
@@ -100,6 +104,7 @@ impl RegisterConfig {
 				is_reserved: false,
 				is_arg: false,
 				is_ret: false,
+				is_scratch: false,
 				save: None,
 			};
 
@@ -111,12 +116,13 @@ impl RegisterConfig {
 					"reserved" => info.is_reserved = true,
 					"arg" => info.is_arg = true,
 					"ret" => info.is_ret = true,
+					"scratch" => info.is_scratch = true,
 					"caller" => info.save = Some(SaveClass::Caller),
 					"callee" => info.save = Some(SaveClass::Callee),
 					other => {
 						return Err(format!(
 							"line {lineno}: unknown class `{other}` on register `{name}` \
-							 (expected zero, reserved, arg, ret, caller or callee)"
+							 (expected zero, reserved, arg, ret, scratch, caller or callee)"
 						))
 					}
 				}
@@ -135,6 +141,11 @@ impl RegisterConfig {
 					"line {lineno}: reserved register `{name}` cannot be in the allocatable pool"
 				));
 			}
+			if info.is_scratch && (info.save.is_some() || info.is_zero || info.is_reserved) {
+				return Err(format!(
+					"line {lineno}: scratch register `{name}` cannot also be zero/reserved/caller/callee"
+				));
+			}
 
 			registers.push(info);
 		}
@@ -143,6 +154,9 @@ impl RegisterConfig {
 
 		if config.allocatable().count() == 0 {
 			return Err("register config has no allocatable (caller/callee) registers".to_string());
+		}
+		if config.scratch_registers().count() == 0 {
+			return Err("register config has no scratch registers (codegen needs at least one)".to_string());
 		}
 
 		Ok(config)
@@ -156,6 +170,11 @@ impl RegisterConfig {
 	/// Number of colours available (`k` for graph colouring).
 	pub fn num_colors(&self) -> usize {
 		self.allocatable().count()
+	}
+
+	/// Registers reserved for codegen scratch use, in file order.
+	pub fn scratch_registers(&self) -> impl Iterator<Item = &RegisterInfo> {
+		self.registers.iter().filter(|r| r.is_scratch)
 	}
 
 	/// Argument registers, in the order arguments are assigned to them.
@@ -180,9 +199,14 @@ mod tests {
 		assert_eq!(config.arg_registers().count(), 8);
 		assert_eq!(config.arg_registers().next().unwrap().name, "a0");
 
-		// s0..s11 + t0..t6, all callee, all allocatable
-		assert_eq!(config.num_colors(), 19);
+		// s0..s11 + t0..t3, all callee, all allocatable (t4..t6 held back as scratch)
+		assert_eq!(config.num_colors(), 16);
 		assert!(config.allocatable().all(|r| r.save == Some(SaveClass::Callee)));
+
+		// t4..t6 are scratch: reserved for codegen, never in the pool
+		assert_eq!(config.scratch_registers().count(), 3);
+		assert_eq!(config.scratch_registers().next().unwrap().name, "t4");
+		assert!(!config.get("t4").unwrap().is_allocatable());
 
 		// a* stay out of the pool for now
 		assert!(!config.get("a0").unwrap().is_allocatable());
@@ -200,7 +224,7 @@ mod tests {
 
 	#[test]
 	fn rejects_unknown_class() {
-		let err = RegisterConfig::parse("t0  scratch").unwrap_err();
+		let err = RegisterConfig::parse("t0  volatile").unwrap_err();
 		assert!(err.contains("unknown class"));
 	}
 
@@ -213,7 +237,7 @@ mod tests {
 	#[test]
 	fn comments_and_blanks_are_ignored() {
 		let config = RegisterConfig::parse(
-			"# leading comment\n\n  t0  callee  # trailing\nt1 callee\n",
+			"# leading comment\n\n  t0  callee  # trailing\nt1 callee\nt2 scratch\n",
 		)
 		.unwrap();
 		assert_eq!(config.num_colors(), 2);

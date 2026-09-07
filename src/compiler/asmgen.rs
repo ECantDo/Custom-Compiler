@@ -1,42 +1,80 @@
+use crate::compiler::register_allocation::config::RegisterConfig;
+use crate::compiler::register_allocation::{self, Coloring};
 use crate::cpu::RAM_SIZE;
+use inkwell::basic_block::BasicBlock;
 use inkwell::module::Module;
-use inkwell::values::{AnyValue, AsValueRef, BasicValueEnum, FunctionValue, InstructionOpcode, InstructionValue};
+use inkwell::values::{AnyValue, AsValueRef, BasicValueEnum, InstructionOpcode, InstructionValue};
 use inkwell::IntPredicate;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const IMMEDIATE_MAX_VALUE_14: i64 = 0x1FFF; // 13 bits
 
+/// Maps SSA values to concrete physical registers for one function.
+///
+/// The graph-colouring allocator (`register_allocation`) decides where every
+/// instruction result lives; this just resolves lookups and hands out the
+/// codegen scratch registers for things the allocator never sees (constants,
+/// parallel-copy cycle breaks).
 struct RegAlloc<'ctx> {
-	next: usize,                                          // Index in to t0...t6 pool
-	assigned: HashMap<BasicValueEnum<'ctx>, String>,    // LLVM value -> register name
+	/// SSA value -> register name. Seeded from the colouring, plus the
+	/// parameter bindings (a0, a1, ...).
+	assigned: HashMap<BasicValueEnum<'ctx>, String>,
+	/// Scratch register names from the target config, e.g. t4/t5/t6.
+	scratch: Vec<String>,
+	/// How many scratch registers are live for the instruction currently
+	/// being lowered. Reset via `scratch_reset` before each one.
+	scratch_in_use: usize,
 }
 
 impl<'ctx> RegAlloc<'ctx> {
-	fn new() -> Self {
-		RegAlloc { next: 0, assigned: HashMap::new() }
+	fn new(coloring: &Coloring<'ctx>, config: &RegisterConfig) -> Self {
+		let assigned = coloring
+			.colors
+			.keys()
+			.map(|&value| {
+				let reg = coloring
+					.register_for(value, config)
+					.expect("coloured value maps to an allocatable register");
+				(value, reg)
+			})
+			.collect();
+
+		let scratch = config.scratch_registers().map(|r| r.name.clone()).collect();
+
+		RegAlloc { assigned, scratch, scratch_in_use: 0 }
 	}
 
-	/// Params are pre-assigned to a0/a1/...  never allocate a fresh temp for them.
+	/// Pin a value to a specific register outside the colouring - used for
+	/// parameters, which live in their argument registers.
 	fn bind(&mut self, val: BasicValueEnum<'ctx>, reg: &str) {
 		self.assigned.insert(val, reg.to_string());
 	}
 
-	/// For instruction RESULTS; assigns the next free scratch reg if not seen yet.
-	fn get_or_assign(&mut self, val: BasicValueEnum<'ctx>) -> String {
-		if let Some(reg) = self.assigned.get(&val) {
-			return reg.clone();
-		}
-		let reg = format!("t{}", self.next);
-		self.next += 1;
-		self.assigned.insert(val, reg.clone());
-		reg
+	/// Register holding `val`. Panics if it was never assigned one, which
+	/// means the allocator and instruction selection disagree about what
+	/// needs a register.
+	fn resolve(&self, val: BasicValueEnum<'ctx>) -> String {
+		self.assigned.get(&val).cloned().unwrap_or_else(|| {
+			panic!("value has no register (not coloured, not a bound parameter)\n{}", val)
+		})
 	}
 
-	/// Looked-up-only version — panics if the value was never assigned, which
-	/// should only happen if instruction selection missed emitting something.
-	fn resolve(&self, val: BasicValueEnum<'ctx>) -> String {
-		self.assigned.get(&val).cloned()
-			.unwrap_or_else(|| panic!("value used before it was assigned a register\n{}", val))
+	/// Forget any scratch registers handed out for the previous instruction.
+	fn scratch_reset(&mut self) {
+		self.scratch_in_use = 0;
+	}
+
+	/// Hand out the next free scratch register for the instruction being
+	/// lowered. Valid only until the next `scratch_reset`.
+	fn next_scratch(&mut self) -> String {
+		let reg = self.scratch.get(self.scratch_in_use).unwrap_or_else(|| {
+			panic!(
+				"code generator ran out of scratch registers (only {} configured)",
+				self.scratch.len()
+			)
+		});
+		self.scratch_in_use += 1;
+		reg.clone()
 	}
 }
 
@@ -50,7 +88,7 @@ fn apply_immediate_operation<'ctx>(
 	let mut out = String::new();
 
 	let lhs_reg = resolve_operand(registers, &mut out, lhs);
-	let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+	let dest = registers.resolve(instruction.as_any_value_enum().try_into().unwrap());
 
 	if let BasicValueEnum::IntValue(rhs_iv) = rhs {
 		if rhs_iv.is_const() {
@@ -123,7 +161,7 @@ fn match_opcode<'ctx>(
 			let mut out = String::new();
 			let (base_reg, offset) = resolve_address(registers, &mut out, addr);
 
-			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+			let dest = registers.resolve(instruction.as_any_value_enum().try_into().unwrap());
 			out.push_str(&format!("\tlod\t{dest} {offset}({base_reg})\n"));
 			out
 		}
@@ -149,51 +187,104 @@ fn match_opcode<'ctx>(
 		}
 
 		InstructionOpcode::Br => {
+			let mut out = String::new();
+			let pred = instruction.get_parent().unwrap();
+
+			// --- unconditional branch ------------------------------------
 			if instruction.get_num_operands() == 1 {
 				let target = instruction.get_operand(0).unwrap().unwrap_block();
-				return format!("\tj\t{fn_name}_{}\n", target.get_name().to_str().unwrap());
+				let target_name = target.get_name().to_str().unwrap().to_string();
+				out.push_str(&phi_moves_for_edge(pred, target, registers));
+				if next_block_name != Some(target_name.as_str()) {
+					out.push_str(&format!("\tj\t{fn_name}_{target_name}\n"));
+				}
+				return out;
 			}
 
+			// --- conditional branch ------------------------------------
 			let cond = instruction.get_operand(0).unwrap().unwrap_value();
 			let then_bb = instruction.get_operand(2).unwrap().unwrap_block();
 			let else_bb = instruction.get_operand(1).unwrap().unwrap_block();
 			let then_name = then_bb.get_name().to_str().unwrap().to_string();
 			let else_name = else_bb.get_name().to_str().unwrap().to_string();
 
-			let mut out = String::new();
+			// Phi copies belong on their edge. Build them up front so we know
+			// whether we can use the tight fall-through form or need a
+			// per-edge trampoline.
+			let then_moves = phi_moves_for_edge(pred, then_bb, registers);
+			let else_moves = phi_moves_for_edge(pred, else_bb, registers);
+			registers.scratch_reset();
 
-			if let BasicValueEnum::IntValue(iv) = cond {
-				if let Some(cond_instr) = iv.as_instruction() {
-					if cond_instr.get_opcode() == InstructionOpcode::ICmp
-						&& instruction.get_previous_instruction() == Some(cond_instr)
-					{
-						// existing fused compare+branch path — unchanged
-						let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
-						let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
-						let lhs_reg = resolve_operand(registers, &mut out, lhs);
-						let rhs_reg = resolve_operand(registers, &mut out, rhs);
-						let predicate = cond_instr.get_icmp_predicate().unwrap();
+			// Is the condition an icmp sitting right before us? Then we test
+			// its operands directly instead of a materialised 0/1 value.
+			let fused = match cond {
+				BasicValueEnum::IntValue(iv) => iv.as_instruction().filter(|ci| {
+					ci.get_opcode() == InstructionOpcode::ICmp
+						&& instruction.get_previous_instruction() == Some(*ci)
+				}),
+				_ => None,
+			};
 
-						if next_block_name == Some(then_name.as_str()) {
-							let mnemonic = branch_mnemonic(invert_predicate(predicate));
-							out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{else_name}\n"));
-						} else {
-							let mnemonic = branch_mnemonic(predicate);
-							out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{then_name}\n"));
-							if next_block_name != Some(else_name.as_str()) {
-								out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
-							}
+			// No phi copies on either edge: keep the original fall-through-aware form.
+			if then_moves.is_empty() && else_moves.is_empty() {
+				if let Some(cond_instr) = fused {
+					let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
+					let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
+					let lhs_reg = resolve_operand(registers, &mut out, lhs);
+					let rhs_reg = resolve_operand(registers, &mut out, rhs);
+					let predicate = cond_instr.get_icmp_predicate().unwrap();
+
+					if next_block_name == Some(then_name.as_str()) {
+						let mnemonic = branch_mnemonic(invert_predicate(predicate));
+						out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{else_name}\n"));
+					} else {
+						let mnemonic = branch_mnemonic(predicate);
+						out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {fn_name}_{then_name}\n"));
+						if next_block_name != Some(else_name.as_str()) {
+							out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
 						}
-						return out;
 					}
+					return out;
 				}
+
+				let cond_reg = resolve_operand(registers, &mut out, cond);
+				out.push_str(&format!("\tbne\t{cond_reg} zero {fn_name}_{then_name}\n"));
+				if next_block_name != Some(else_name.as_str()) {
+					out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+				}
+				return out;
 			}
 
-			// General case: condition is a real 0/1 value already sitting in a register
-			let cond_reg = resolve_operand(registers, &mut out, cond);
-			out.push_str(&format!("\tbne\t{cond_reg} zero {fn_name}_{then_name}\n"));
-			if next_block_name != Some(else_name.as_str()) {
-				out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+			// At least one edge carries phi copies. Emit a trampoline so each
+			// edge's copies run only when that edge is taken:
+			//
+			//     <test>  branch to L_then when the THEN condition holds
+			//     <else edge copies>
+			//     j else
+			//   L_then:
+			//     <then edge copies>
+			//     j then          (dropped when `then` is the next block)
+			let id = instruction.as_value_ref() as usize;
+			let then_label = format!("{fn_name}_br{id}_then");
+
+			if let Some(cond_instr) = fused {
+				let lhs = cond_instr.get_operand(0).unwrap().unwrap_value();
+				let rhs = cond_instr.get_operand(1).unwrap().unwrap_value();
+				let lhs_reg = resolve_operand(registers, &mut out, lhs);
+				let rhs_reg = resolve_operand(registers, &mut out, rhs);
+				let mnemonic = branch_mnemonic(cond_instr.get_icmp_predicate().unwrap());
+				out.push_str(&format!("\t{mnemonic}\t{lhs_reg} {rhs_reg} {then_label}\n"));
+			} else {
+				let cond_reg = resolve_operand(registers, &mut out, cond);
+				out.push_str(&format!("\tbne\t{cond_reg} zero {then_label}\n"));
+			}
+
+			out.push_str(&else_moves);
+			out.push_str(&format!("\tj\t{fn_name}_{else_name}\n"));
+			out.push_str(&format!("{then_label}:\n"));
+			out.push_str(&then_moves);
+			if next_block_name != Some(then_name.as_str()) {
+				out.push_str(&format!("\tj\t{fn_name}_{then_name}\n"));
 			}
 			out
 		}
@@ -215,13 +306,17 @@ fn match_opcode<'ctx>(
 			let src = instruction.get_operand(0).unwrap().unwrap_value();
 			let mut out = String::new();
 			let src_reg = resolve_operand(registers, &mut out, src);
+			let dest = registers.resolve(instruction.as_any_value_enum().try_into().unwrap());
 
-			// Both source and destination fit in a single 16-bit word ... no real
-			// instruction needed, just alias the destination to the same register.
-			// NOTE: this assumes dest fits in ≤16 bits. Zero-extending into a real
-			// 32-bit value (two registers, low+high) isn't handled yet, that needs
-			// ADDF/SUBF two-register i32 convention wired in here too
-			registers.assigned.insert(instruction.as_any_value_enum().try_into().unwrap(), src_reg);
+			// Both source and destination fit in a single 16-bit word, so this
+			// is just a copy into the destination register the allocator chose
+			// (and folds away entirely when they coincide - see the self-move
+			// peephole). NOTE: this assumes dest fits in ≤16 bits. Zero-extending
+			// into a real 32-bit value (two registers, low+high) isn't handled
+			// yet, that needs the ADDF/SUBF two-register i32 convention here too.
+			if src_reg != dest {
+				out.push_str(&format!("\tmv\t{src_reg} {dest}\n"));
+			}
 			out
 		}
 
@@ -229,10 +324,14 @@ fn match_opcode<'ctx>(
 			let src = instruction.get_operand(0).unwrap().unwrap_value();
 			let mut out = String::new();
 			let src_reg = resolve_operand(registers, &mut out, src);
+			let dest = registers.resolve(instruction.as_any_value_enum().try_into().unwrap());
 
 			// On this hardware a pointer IS just a 16-bit address — inttoptr is a
-			// pure reinterpretation, not a real operation. Alias dest to src's reg.
-			registers.assigned.insert(instruction.as_any_value_enum().try_into().unwrap(), src_reg);
+			// pure reinterpretation, not a real operation. Copy into dest (folds
+			// away when src and dest share a register).
+			if src_reg != dest {
+				out.push_str(&format!("\tmv\t{src_reg} {dest}\n"));
+			}
 			out
 		}
 
@@ -240,7 +339,10 @@ fn match_opcode<'ctx>(
 			let src = instruction.get_operand(0).unwrap().unwrap_value();
 			let mut out = String::new();
 			let src_reg = resolve_operand(registers, &mut out, src);
-			registers.assigned.insert(instruction.as_any_value_enum().try_into().unwrap(), src_reg);
+			let dest = registers.resolve(instruction.as_any_value_enum().try_into().unwrap());
+			if src_reg != dest {
+				out.push_str(&format!("\tmv\t{src_reg} {dest}\n"));
+			}
 			out
 		}
 
@@ -253,7 +355,7 @@ fn match_opcode<'ctx>(
 			let cond_reg = resolve_operand(registers, &mut out, cond);
 			let true_reg = resolve_operand(registers, &mut out, true_val);
 			let false_reg = resolve_operand(registers, &mut out, false_val);
-			let dest = registers.get_or_assign(instruction.as_any_value_enum().try_into().unwrap());
+			let dest = registers.resolve(instruction.as_any_value_enum().try_into().unwrap());
 
 			// Raw pointer as a cheap unique id for label naming - same trick as
 			// materialize_icmp, works regardless of the select's result type.
@@ -287,29 +389,26 @@ pub fn build(module: &Module) -> String {
 		out.push_str("j\tmain\n");
 	}
 
+	let config = RegisterConfig::load_default()
+		.unwrap_or_else(|e| panic!("register allocation config: {e}"));
+
 	for function in module.get_functions() {
 		let name = function.get_name().to_str().unwrap();
 		let is_main = name == "main";
 		out.push_str(&format!("\n{name}:\n"));
 
-		let mut registers = RegAlloc::new();
-		// Bind a0 ... regs
-		for (i, param) in function.get_param_iter().enumerate() {
-			registers.bind(param, &format!("a{i}"));
+		if function.count_basic_blocks() == 0 {
+			continue; // extern declaration — no body
 		}
 
-		// PASS 1: pre-assign registers to every phi in the function
-		for block in function.get_basic_block_iter() {
-			for instr in block.get_instructions() {
-				if instr.get_opcode() == InstructionOpcode::Phi {
-					registers.get_or_assign(instr.as_any_value_enum().try_into().unwrap());
-				} else {
-					break; // phis always sit at the very top of a block
-				}
-			}
-		}
+		let coloring = register_allocation::allocate_function(function, &config)
+			.unwrap_or_else(|e| panic!("{e}"));
 
-		coalesce_phi_copies(function, &mut registers);
+		let mut registers = RegAlloc::new(&coloring, &config);
+		// Parameters arrive in the argument registers a0, a1, ...
+		for (param, arg_reg) in function.get_param_iter().zip(config.arg_registers()) {
+			registers.bind(param, &arg_reg.name);
+		}
 
 		let blocks: Vec<_> = function.get_basic_block_iter().collect();
 		for (i, block) in blocks.iter().enumerate() {
@@ -327,27 +426,42 @@ pub fn build(module: &Module) -> String {
 
 			for instruction in &instructions {
 				if instruction.get_opcode() == InstructionOpcode::Phi { continue; }
-				if instruction.is_terminator() {
-					out.push_str(&emit_phi_moves(*instruction, block, &mut registers));
-				}
-				out.push_str(&match_opcode(*instruction, &mut registers, &name, next_block_name.as_deref(), is_main));
+				// Phi copies for the block's successors are emitted by the
+				// terminator (Br) itself, placed on the correct edge.
+				registers.scratch_reset();
+				out.push_str(&match_opcode(*instruction, &mut registers, name, next_block_name.as_deref(), is_main));
 			}
 		}
 	}
 
-	peephole_remove_redundant_jumps(&out)
-	// out
+	peephole(&out)
 }
 
-fn peephole_remove_redundant_jumps(asm: &str) -> String {
-	let lines: Vec<&str> = asm.lines().collect();
-	let mut out = Vec::new();
+/// Cheap cleanup pass over the finished assembly text:
+///   * drop `mv x x` (the allocator put a copy's source and destination in
+///     the same register - common for zext/inttoptr and coalesced phis);
+///   * drop `j L` when `L:` is the very next line.
+fn peephole(asm: &str) -> String {
+	let kept: Vec<&str> = asm
+		.lines()
+		.filter(|line| {
+			let trimmed = line.trim();
+			if let Some(rest) = trimmed.strip_prefix("mv\t") {
+				let mut parts = rest.split_whitespace();
+				if let (Some(src), Some(dest), None) = (parts.next(), parts.next(), parts.next()) {
+					return src != dest;
+				}
+			}
+			true
+		})
+		.collect();
 
+	let mut out = Vec::with_capacity(kept.len());
 	let mut i = 0;
-	while i < lines.len() {
-		let line = lines[i];
+	while i < kept.len() {
+		let line = kept[i];
 		if let Some(target) = line.trim().strip_prefix("j\t") {
-			if let Some(next) = lines.get(i + 1) {
+			if let Some(next) = kept.get(i + 1) {
 				if next.trim_end() == format!("{}:", target.trim()) {
 					i += 1; // skip the jump, keep the label
 					continue;
@@ -364,159 +478,118 @@ fn peephole_remove_redundant_jumps(asm: &str) -> String {
 fn resolve_operand<'ctx>(regs: &mut RegAlloc<'ctx>, out: &mut String, val: BasicValueEnum<'ctx>) -> String {
 	if let Some(const_val) = as_constant_i64(val) {
 		if const_val == 0 {
-			regs.assigned.insert(val, "zero".to_string());
 			return "zero".to_string();
 		}
-		let reg = format!("t{}", regs.next);
-		regs.next += 1;
-		regs.assigned.insert(val, reg.clone());
+		// Constants aren't register-allocated - materialise into a scratch
+		// register, fresh at each use.
+		let reg = regs.next_scratch();
 		out.push_str(&format!("\tli\t{const_val} {reg}\n"));
 		return reg;
 	}
 	regs.resolve(val)
 }
 
-fn emit_phi_moves<'ctx>(
-	terminator: InstructionValue<'ctx>,
-	current_block: &inkwell::basic_block::BasicBlock<'ctx>,
+/// Where a phi's incoming value comes from on a particular edge.
+enum CopySource {
+	Reg(String),
+	/// A non-zero immediate.
+	Imm(i64),
+	Zero,
+}
+
+/// The simultaneous register copies that realise `succ`'s phi nodes for the
+/// edge coming from `pred`. Returned as assembly text to be placed *on that
+/// edge* - never before a conditional branch that might not take it.
+fn phi_moves_for_edge<'ctx>(
+	pred: BasicBlock<'ctx>,
+	succ: BasicBlock<'ctx>,
 	registers: &mut RegAlloc<'ctx>,
 ) -> String {
-	let targets: Vec<_> = match terminator.get_opcode() {
-		InstructionOpcode::Br if terminator.get_num_operands() == 1 => {
-			vec![terminator.get_operand(0).unwrap().unwrap_block()]
+	registers.scratch_reset();
+
+	let mut copies: Vec<(String, CopySource)> = Vec::new();
+
+	for instr in succ.get_instructions() {
+		if instr.get_opcode() != InstructionOpcode::Phi {
+			break; // phis are contiguous at the top of a block
 		}
-		InstructionOpcode::Br => vec![
-			terminator.get_operand(1).unwrap().unwrap_block(),
-			terminator.get_operand(2).unwrap().unwrap_block(),
-		],
-		_ => return String::new(),
-	};
+		let phi: inkwell::values::PhiValue = instr.try_into().unwrap();
+		let dest = registers.resolve(instr.as_any_value_enum().try_into().unwrap());
+
+		for i in 0..phi.count_incoming() {
+			let Some((incoming_val, incoming_block)) = phi.get_incoming(i) else { continue; };
+			if incoming_block != pred {
+				continue;
+			}
+
+			// An undef incoming value supplies nothing defined for this phi
+			// (e.g. a loop-local merged along the pre-header edge) - no move.
+			if !is_undef(incoming_val) {
+				let source = match as_constant_i64(incoming_val) {
+					Some(0) => CopySource::Zero,
+					Some(v) => CopySource::Imm(v),
+					None => CopySource::Reg(registers.resolve(incoming_val)),
+				};
+				copies.push((dest, source));
+			}
+			break; // one incoming edge per (phi, predecessor)
+		}
+	}
+
+	sequence_parallel_copy(copies, registers)
+}
+
+/// Lower a set of copies that logically happen at once into a correct
+/// sequence of `mv`/`li`. Register cycles (`a<-b, b<-a`) are broken with a
+/// scratch register.
+fn sequence_parallel_copy(copies: Vec<(String, CopySource)>, registers: &mut RegAlloc) -> String {
+	// Copies already satisfied (destination already holds the source) drop out.
+	let mut pending: Vec<(String, CopySource)> = copies
+		.into_iter()
+		.filter(|(dest, src)| !matches!(src, CopySource::Reg(r) if r == dest))
+		.collect();
 
 	let mut out = String::new();
-	for target in targets {
-		for instr in target.get_instructions() {
-			if instr.get_opcode() != InstructionOpcode::Phi { break; }
-			let phi: inkwell::values::PhiValue = instr.try_into().unwrap();
-			for i in 0..phi.count_incoming() {
-				if let Some((incoming_val, incoming_block)) = phi.get_incoming(i) {
-					if incoming_block == *current_block {
-						let dest = registers.get_or_assign(instr.as_any_value_enum().try_into().unwrap());
 
-						if is_undef(incoming_val) {
-							// This edge never actually supplies a real value for
-							// this phi (e.g. a loop-local variable merged at the
-							// loop header along the preheader edge, before the
-							// loop has run once). Nothing meaningful to move -
-							// dest is left whatever it already was.
-							continue;
-						}
+	while !pending.is_empty() {
+		let src_regs: HashSet<String> = pending
+			.iter()
+			.filter_map(|(_, src)| match src {
+				CopySource::Reg(r) => Some(r.clone()),
+				_ => None,
+			})
+			.collect();
 
-						let const_val = as_constant_i64(incoming_val);
+		// A copy whose destination nobody else still needs as a source is
+		// free to emit now.
+		if let Some(pos) = pending.iter().position(|(dest, _)| !src_regs.contains(dest)) {
+			let (dest, src) = pending.remove(pos);
+			emit_copy(&mut out, &dest, &src);
+			continue;
+		}
 
-						if let Some(v) = const_val {
-							if v == 0 {
-								out.push_str(&format!("\tmv\tzero {dest}\n"));
-							} else {
-								out.push_str(&format!("\tli\t{v} {dest}\n"));
-							}
-						} else {
-							let src = resolve_operand(registers, &mut out, incoming_val);
-							if src != dest {
-								out.push_str(&format!("\tmv\t{src} {dest}\n"));
-							}
-						}
-					}
+		// Everything left is a register cycle. Park one destination's live
+		// value in scratch and redirect whoever was reading it.
+		let cycle_dest = pending[0].0.clone();
+		let scratch = registers.next_scratch();
+		out.push_str(&format!("\tmv\t{cycle_dest} {scratch}\n"));
+		for (_, src) in pending.iter_mut() {
+			if let CopySource::Reg(r) = src {
+				if *r == cycle_dest {
+					*r = scratch.clone();
 				}
 			}
 		}
 	}
+
 	out
 }
 
-/// Counts how many times each SSA value is used as an operand anywhere in
-/// the function. A value can only be coalesced into a phi's register if
-/// the phi is its ONLY use — if something else still needs it, giving it
-/// away would just be wrong.
-fn count_operand_uses<'ctx>(function: FunctionValue<'ctx>) -> HashMap<BasicValueEnum<'ctx>, usize> {
-	let mut uses: HashMap<BasicValueEnum<'ctx>, usize> = HashMap::new();
-	for block in function.get_basic_block_iter() {
-		for instr in block.get_instructions() {
-			for i in 0..instr.get_num_operands() {
-				if let Some(Some(val)) = instr.get_operand(i).map(|op| op.value()) {
-					*uses.entry(val).or_insert(0) += 1;
-				}
-			}
-		}
-	}
-	uses
-}
-
-/// PASS 1.5: copy coalescing.
-///
-/// For every phi, look at the value flowing in from each predecessor. If
-/// that value is computed in the predecessor block, used nowhere else,
-/// AND doesn't itself depend on some OTHER phi in the same target block
-/// (which would make this part of a swap/rotation - unsafe to coalesce),
-/// bind it straight to the phi's register now. Codegen picks this up
-/// later via `get_or_assign` and the `mv` this would've needed collapses
-/// to a no-op.
-fn coalesce_phi_copies<'ctx>(function: FunctionValue<'ctx>, registers: &mut RegAlloc<'ctx>) {
-	let uses = count_operand_uses(function);
-
-	for block in function.get_basic_block_iter() {
-		let Some(terminator) = block.get_terminator() else { continue; };
-
-		let targets: Vec<_> = match terminator.get_opcode() {
-			InstructionOpcode::Br if terminator.get_num_operands() == 1 => {
-				vec![terminator.get_operand(0).unwrap().unwrap_block()]
-			}
-			InstructionOpcode::Br => vec![
-				terminator.get_operand(1).unwrap().unwrap_block(),
-				terminator.get_operand(2).unwrap().unwrap_block(),
-			],
-			_ => continue,
-		};
-
-		for target in targets {
-			let phis: Vec<InstructionValue> = target.get_instructions()
-				.take_while(|i| i.get_opcode() == InstructionOpcode::Phi)
-				.collect();
-
-			for &phi_instr in &phis {
-				let phi: inkwell::values::PhiValue = phi_instr.try_into().unwrap();
-
-				for i in 0..phi.count_incoming() {
-					let Some((incoming_val, incoming_block)) = phi.get_incoming(i) else { continue; };
-					if incoming_block != block { continue; }
-
-					// Only real instructions can be re-homed — constants get
-					// materialized fresh at each use anyway.
-					let BasicValueEnum::IntValue(iv) = incoming_val else { continue; };
-					let Some(def_instr) = iv.as_instruction() else { continue; };
-
-					if def_instr.get_parent() != Some(block) { continue; }
-					if uses.get(&incoming_val).copied().unwrap_or(0) != 1 { continue; }
-					if registers.assigned.contains_key(&incoming_val) { continue; }
-
-					// Safety check: does this value depend on a SIBLING phi
-					// (a different loop variable)? If so it's part of a
-					// rotation/swap and needs its own temp - skip it.
-					let depends_on_sibling_phi = (0..def_instr.get_num_operands()).any(|i| {
-						def_instr.get_operand(i)
-							.and_then(|op| op.value())
-							.map(|val| phis.iter().any(|&p| {
-								p != phi_instr && BasicValueEnum::try_from(p.as_any_value_enum()).unwrap() == val
-							}))
-							.unwrap_or(false)
-					});
-					if depends_on_sibling_phi { continue; }
-
-					let phi_val: BasicValueEnum = phi_instr.as_any_value_enum().try_into().unwrap();
-					let phi_reg = registers.resolve(phi_val);
-					registers.bind(incoming_val, &phi_reg);
-				}
-			}
-		}
+fn emit_copy(out: &mut String, dest: &str, src: &CopySource) {
+	match src {
+		CopySource::Reg(r) => out.push_str(&format!("\tmv\t{r} {dest}\n")),
+		CopySource::Zero => out.push_str(&format!("\tmv\tzero {dest}\n")),
+		CopySource::Imm(v) => out.push_str(&format!("\tli\t{v} {dest}\n")),
 	}
 }
 
@@ -617,7 +690,7 @@ fn materialize_icmp<'ctx>(icmp: InstructionValue<'ctx>, registers: &mut RegAlloc
 	let mut out = String::new();
 	let lhs_reg = resolve_operand(registers, &mut out, lhs);
 	let rhs_reg = resolve_operand(registers, &mut out, rhs);
-	let dest = registers.get_or_assign(icmp.as_any_value_enum().try_into().unwrap());
+	let dest = registers.resolve(icmp.as_any_value_enum().try_into().unwrap());
 
 	// unique-ish labels; instruction address works fine as a disambiguator
 	let id = icmp.as_any_value_enum().into_int_value().as_value_ref() as usize;
@@ -679,5 +752,94 @@ fn invert_predicate(predicate: IntPredicate) -> IntPredicate {
 		IntPredicate::UGE => IntPredicate::ULT,
 		IntPredicate::ULT => IntPredicate::UGE,
 		IntPredicate::ULE => IntPredicate::UGT,
+	}
+}
+#[cfg(test)]
+mod tests {
+	use super::build;
+	use crate::compiler::codegen::{BuildMode, Codegen};
+	use crate::compiler::lexer::tokenize;
+	use crate::compiler::parser::Parser;
+	use crate::compiler::typecheck::check_program;
+	use inkwell::context::Context;
+
+	/// Compile a source file the same way `compile_to_asm` does and return the
+	/// generated assembly.
+	fn asm_for(file: &str) -> String {
+		let source = std::fs::read_to_string(format!("./src/compiler/programs/{file}.ecc")).unwrap();
+		let tokens = tokenize(&source);
+		let mut program = Parser::new(tokens).parse_program();
+		check_program(&mut program);
+
+		let ctx = Context::create();
+		let mut codegen = Codegen::new(&ctx, file, BuildMode::Release);
+		codegen.lower_program(&program);
+		crate::compiler::optimize(&codegen.module, "default<Oz>");
+		codegen.module.verify().expect("module verifies");
+
+		build(&codegen.module)
+	}
+
+	/// Every operand of every emitted instruction must be a real machine
+	/// register, `zero`, or an immediate - never a leftover SSA name or an
+	/// empty string, and the self-move peephole must have run.
+	fn assert_well_formed(asm: &str) {
+		for line in asm.lines() {
+			let line = line.trim();
+			if line.is_empty() || line.ends_with(':') {
+				continue;
+			}
+			let mut parts = line.split_whitespace();
+			let mnemonic = parts.next().unwrap();
+
+			if mnemonic == "mv" {
+				let regs: Vec<&str> = parts.collect();
+				assert_eq!(regs.len(), 2, "mv takes two operands: {line}");
+				assert_ne!(regs[0], regs[1], "self-move survived the peephole: {line}");
+			}
+
+			for tok in line.split_whitespace().skip(1) {
+				assert!(!tok.contains('%'), "un-lowered SSA operand in `{line}`");
+			}
+		}
+	}
+
+	#[test]
+	fn fib_lowers_and_realises_the_loop_carried_phi_cycle() {
+		let asm = asm_for("fib");
+		assert_well_formed(&asm);
+
+		// The while-loop rotates b <- a, a <- addtmp through shared registers,
+		// which is a true parallel-copy cycle: it must be broken with a scratch
+		// register (t4/t5/t6), not lowered as a naive sequence of `mv`s.
+		let body = asm
+			.split("while.body")
+			.nth(1)
+			.expect("fib has a while.body block");
+		let cycle_break = body
+			.lines()
+			.take_while(|l| !l.trim_start().starts_with('j'))
+			.any(|l| {
+				let l = l.trim();
+				l.starts_with("mv\t") && (l.contains(" t4") || l.contains(" t5") || l.contains(" t6"))
+			});
+		assert!(cycle_break, "loop-carried phi cycle was not broken with scratch:\n{asm}");
+	}
+
+	#[test]
+	fn malloc_places_phi_copies_on_their_edge() {
+		let asm = asm_for("std_lib");
+		assert_well_formed(&asm);
+
+		// malloc's entry block ends in a conditional branch whose `then`
+		// successor (common.ret) has a phi. The copy for that edge must sit
+		// after the branch, behind its own label - never before it, where the
+		// fall-through path would run it too.
+		let malloc = asm.split("\nmalloc:").nth(1).expect("malloc emitted");
+		let malloc = malloc.split("\nfree:").next().unwrap();
+		assert!(
+			malloc.contains("_then:"),
+			"expected an edge trampoline label in malloc:\n{malloc}"
+		);
 	}
 }
