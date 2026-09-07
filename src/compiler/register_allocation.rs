@@ -3,19 +3,51 @@ mod graph;
 pub mod config;
 
 use config::RegisterConfig;
-use graph::Graph;
+use graph::{Coloring, Graph};
+use inkwell::module::Module;
 use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, InstructionValue};
 
+/// Load `registers.cfg` and run the allocator over every defined function
+/// in `module`.
+pub fn allocate_module<'ctx>(module: &Module<'ctx>) -> Result<(), String> {
+	let target = RegisterConfig::load_default()?;
+
+	for function in module.get_functions() {
+		if function.count_basic_blocks() == 0 {
+			continue; // extern declaration — no body to allocate
+		}
+		initialize_register_allocation(function, &target);
+	}
+
+	Ok(())
+}
 
 pub fn initialize_register_allocation<'ctx>(
 	function: FunctionValue<'ctx>,
 	target: &RegisterConfig,
-) {
+) -> Option<Coloring<'ctx>> {
 	let liveness = liveness::compute_liveness(function);
 	let graph = Graph::build_interference_graph(function, &liveness);
 
-	// TODO: colour `graph` with `target.num_colors()` registers, drawn from
-	// `target.allocatable()` in order.
+	// The number of physical registers we're allowed to colour with is just
+	// the size of the allocatable pool in the config.
+	let k = target.num_colors();
+	let name = function.get_name().to_str().unwrap_or("?");
+
+	match graph.color(k) {
+		Ok(coloring) => {
+			eprintln!(
+				"regalloc {name}: {} value(s) coloured using {} of {k} register(s)",
+				coloring.colors.len(),
+				coloring.colors_used,
+			);
+			Some(coloring)
+		}
+		Err(spills) => panic!(
+			"regalloc {name}: {} value(s) spilled — no stack to spill to yet",
+			spills.len(),
+		),
+	}
 }
 
 /// Same "does this instruction produce a usable value" check as
