@@ -1,8 +1,10 @@
 use crate::cpu::{UnsignedWord, Word};
 
+mod config;
 mod screen;
 
-pub use screen::{MinifbScreen};
+use config::{PeripheralConfig, ScreenKind};
+pub use screen::{MinifbColorScreen, MinifbScreen};
 
 /// Port of `CPU.Peripherals.IOInterface`.
 pub trait IoInterface {
@@ -25,13 +27,33 @@ impl IoPorts {
 		Self { io_ports: Default::default() }
 	}
 
-	/// Port of `IO()`: attaches a real screen on port 0, same as Java
-	/// hardcoding `new JavaScreen(16, 64)` in the constructor. Returns a
-	/// `Result` (unlike Java) since opening a real window can fail -
-	/// no display available, etc.
-	pub fn new() -> Result<Self, minifb::Error> {
+	/// Attaches a real display, picked by `peripherals.cfg` (see
+	/// [`PeripheralConfig`]). Historically Java hardcoded
+	/// `new JavaScreen(16, 64)` on port 0; that is still the default when
+	/// no config file is present.
+	///
+	/// * `screen = bw`    - monochrome lamp display on port 0.
+	/// * `screen = color` - RGB444 display: colour shift-register port on 0,
+	///   instruction port on 1.
+	///
+	/// Returns a `Result` (unlike Java) since opening a real window can
+	/// fail - no display available, etc. - or the config can be malformed.
+	pub fn new() -> Result<Self, String> {
+		let config = PeripheralConfig::load_default()?;
 		let mut io = Self::empty();
-		io.attach(0, Box::new(MinifbScreen::new(16, 64)?));
+
+		match config.screen {
+			ScreenKind::Bw => {
+				let screen = MinifbScreen::new(16, 64).map_err(|e| e.to_string())?;
+				io.attach(0, Box::new(screen));
+			}
+			ScreenKind::Color => {
+				let screen = MinifbColorScreen::new(16, 64).map_err(|e| e.to_string())?;
+				io.attach(0, screen.buffer_port());
+				io.attach(1, screen.instruction_port());
+			}
+		}
+
 		Ok(io)
 	}
 
