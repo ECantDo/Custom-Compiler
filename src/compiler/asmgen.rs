@@ -404,7 +404,8 @@ fn match_opcode<'ctx>(
 
 pub fn build(module: &Module) -> String {
 	let mut out = String::new();
-	// Initialize stack pointer
+
+	let mut newline_function = false;
 
 	// Program entry point: jump straight to main regardless of what order
 	// functions happen to be emitted in. If main is emitted first, the
@@ -412,8 +413,10 @@ pub fn build(module: &Module) -> String {
 	// jump-to-immediately-next-label are equivalent), so no special-casing
 	// needed either way.
 	if module.get_function("main").is_some() {
+		// Initialize stack pointer
 		out.push_str(&format!("li\t{} sp\n", RAM_SIZE - 1));
 		out.push_str("j\tmain\n");
+		newline_function = true;
 	}
 
 	let config = RegisterConfig::load_default()
@@ -422,7 +425,11 @@ pub fn build(module: &Module) -> String {
 	for function in module.get_functions() {
 		let name = function.get_name().to_str().unwrap();
 		let is_main = name == "main";
-		out.push_str(&format!("\n{name}:\n"));
+		if newline_function {
+			out.push_str("\n");
+		}
+		out.push_str(&format!("{name}:\n"));
+		newline_function = true;
 
 		if function.count_basic_blocks() == 0 {
 			continue; // extern declaration — no body
