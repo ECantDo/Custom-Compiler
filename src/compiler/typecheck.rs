@@ -43,11 +43,22 @@ impl SymbolTable {
 pub struct TypeContext {
 	parents: Vec<usize>,
 	resolved: Vec<Option<Type>>,
+	/// Best-known source line + a short "what were we checking" phrase for the
+	/// unification currently in progress. Set by [`unify_at`] so the deferred
+	/// panics down here can point at real source.
+	site: Option<(usize, String)>,
 }
 
 impl TypeContext {
 	pub fn new() -> Self {
-		TypeContext { parents: Vec::new(), resolved: Vec::new() }
+		TypeContext { parents: Vec::new(), resolved: Vec::new(), site: None }
+	}
+
+	fn where_str(&self) -> String {
+		match &self.site {
+			Some((line, what)) => format!(" (line {line}, {what})"),
+			None => String::new(),
+		}
 	}
 
 	pub fn fresh_var(&mut self) -> TypeVar {
@@ -71,7 +82,7 @@ impl TypeContext {
 		let root = self.find(var);
 		match &self.resolved[root] {
 			Some(existing) if *existing != ty =>
-				panic!("type mismatch: inferred both {:?} and {:?}", existing, ty),
+				panic!("type mismatch{}: this value is used as both {:?} and {:?}", self.where_str(), existing, ty),
 			_ => self.resolved[root] = Some(ty),
 		}
 	}
@@ -83,7 +94,7 @@ impl TypeContext {
 		let merged = match (&self.resolved[ra], &self.resolved[rb]) {
 			(Some(t), None) | (None, Some(t)) => Some(t.clone()),
 			(Some(t1), Some(t2)) if t1 == t2 => Some(t1.clone()),
-			(Some(t1), Some(t2)) => panic!("type mismatch: {:?} vs {:?}", t1, t2),
+			(Some(t1), Some(t2)) => panic!("type mismatch{}: {:?} vs {:?}", self.where_str(), t1, t2),
 			(None, None) => None,
 		};
 		self.parents[rb] = ra;
@@ -132,20 +143,20 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, consts: &HashMap<String, (Type
 			}
 		}
 
-		Expr::Binary { op, left, right } => {
+		Expr::Binary { op, left, right, line } => {
 			let lt = infer_expr(left, symbols, consts, ctx, scratch, sigs);
 			let rt = infer_expr(right, symbols, consts, ctx, scratch, sigs);
-			unify(&lt, &rt, ctx);
+			unify_at(&lt, &rt, ctx, *line, || format!("operands of `{op:?}`"));
 			match op {
 				BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt
 				| BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or => Inferred::Concrete(Type::Bool),
 				_ => lt,
 			}
 		}
-		Expr::Assign { target, value } => {
+		Expr::Assign { target, value, line } => {
 			let target_ty = infer_expr(target, symbols, consts, ctx, scratch, sigs);
 			let value_ty = infer_expr(value, symbols, consts, ctx, scratch, sigs);
-			unify(&target_ty, &value_ty, ctx);
+			unify_at(&target_ty, &value_ty, ctx, *line, || "assignment".to_string());
 			target_ty
 		}
 		Expr::Unary { op, expr } => {
@@ -175,35 +186,56 @@ fn infer_expr(expr: &Expr, symbols: &SymbolTable, consts: &HashMap<String, (Type
 		// `fetch` is the one true intrinsic - it's the primitive everything else
 		// (including malloc/free, once you write them) bottoms out on, so it can't
 		// itself be written in your language. Always reads one full Word.
-		Expr::Call { name, args } if name == "fetch" => {
+		Expr::Call { name, args, .. } if name == "fetch" => {
 			assert_eq!(args.len(), 1, "fetch(addr) takes exactly one argument");
 			infer_expr(&args[0], symbols, consts, ctx, scratch, sigs);
 			Inferred::Concrete(Type::I16)
 		}
 
-		Expr::Call { name, args } if name == "store" => {
+		Expr::Call { name, args, .. } if name == "store" => {
 			assert_eq!(args.len(), 2, "store(addr, value) takes exactly two arguments");
 			infer_expr(&args[0], symbols, consts, ctx, scratch, sigs);
 			infer_expr(&args[1], symbols, consts, ctx, scratch, sigs);
 			Inferred::Concrete(Type::I16)
 		}
 
+		// `port_out(port, value)` / `port_in(port)` - the IO-port intrinsics.
+		// They lower straight to the custom ISA's `out` / `in` instructions, so
+		// like `fetch` they can't be written in the language. `port` must be a
+		// compile-time constant (it encodes as a 4-bit immediate); that's
+		// enforced in codegen, not here.
+		Expr::Call { name, args, .. } if name == "port_out" => {
+			assert_eq!(args.len(), 2, "port_out(port, value) takes exactly two arguments");
+			infer_expr(&args[0], symbols, consts, ctx, scratch, sigs);
+			infer_expr(&args[1], symbols, consts, ctx, scratch, sigs);
+			Inferred::Concrete(Type::I16)
+		}
+
+		Expr::Call { name, args, .. } if name == "port_in" => {
+			assert_eq!(args.len(), 1, "port_in(port) takes exactly one argument");
+			infer_expr(&args[0], symbols, consts, ctx, scratch, sigs);
+			Inferred::Concrete(Type::I16)
+		}
+
 		// General function calls - looks up the real declared signature (this is
 		// what malloc/free will go through once you write them as real `fn`s).
-		Expr::Call { name, args } => {
+		Expr::Call { name, args, line } => {
 			let (param_tys, return_ty) = sigs.get(name)
-				.unwrap_or_else(|| panic!("call to undefined function '{name}'"));
+				.unwrap_or_else(|| panic!("call to undefined function '{name}' (line {line})"));
 
 			if args.len() != param_tys.len() {
 				panic!(
-					"'{name}' expects {} argument(s), got {}",
+					"line {line}: `{name}` expects {} argument(s), got {}",
 					param_tys.len(), args.len()
 				);
 			}
 
-			for (arg, expected) in args.iter().zip(param_tys.iter()) {
+			for (i, (arg, expected)) in args.iter().zip(param_tys.iter()).enumerate() {
 				let arg_ty = infer_expr(arg, symbols, consts, ctx, scratch, sigs);
-				unify(&arg_ty, &Inferred::Concrete(expected.clone()), ctx);
+				let (name, expected) = (name.clone(), expected.clone());
+				unify_at(&arg_ty, &Inferred::Concrete(expected), ctx, *line, || {
+					format!("argument {} of `{name}`", i + 1)
+				});
 			}
 
 			match return_ty {
@@ -227,8 +259,50 @@ fn unify(a: &Inferred, b: &Inferred, ctx: &mut TypeContext) {
 		(Inferred::Var(v), Inferred::Concrete(t)) | (Inferred::Concrete(t), Inferred::Var(v)) =>
 			ctx.unify_concrete(*v, t.clone()),
 		(Inferred::Concrete(t1), Inferred::Concrete(t2)) if t1 != t2 =>
-			panic!("type mismatch: {:?} vs {:?}", t1, t2),
+			panic!("type mismatch{}: {:?} vs {:?}", ctx.where_str(), t1, t2),
 		_ => {}
+	}
+}
+
+/// `unify`, but records where in the source we are first so every mismatch
+/// panic (here and the deferred ones inside `TypeContext`) can name a line.
+/// `what` is a short phrase like `"assignment"` or `` "argument 2 of `foo`" ``.
+fn unify_at(
+	a: &Inferred,
+	b: &Inferred,
+	ctx: &mut TypeContext,
+	line: usize,
+	what: impl FnOnce() -> String,
+) {
+	ctx.site = Some((line, what()));
+	unify(a, b, ctx);
+	ctx.site = None;
+}
+
+/// [`unify_at`] when the line is only maybe-known (statement-level checks
+/// dig it out of a sub-expression, which doesn't always carry one).
+fn unify_near(
+	a: &Inferred,
+	b: &Inferred,
+	ctx: &mut TypeContext,
+	line: Option<usize>,
+	what: impl FnOnce() -> String,
+) {
+	match line {
+		Some(l) => unify_at(a, b, ctx, l, what),
+		None => unify(a, b, ctx),
+	}
+}
+
+/// Best-effort source line for an expression: the operator/`=`/call sites
+/// carry one directly; otherwise peer through the transparent wrappers.
+fn expr_line(expr: &Expr) -> Option<usize> {
+	match expr {
+		Expr::Binary { line, .. } | Expr::Assign { line, .. } | Expr::Call { line, .. } => Some(*line),
+		Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Deref(expr) | Expr::AddrOf(expr) => {
+			expr_line(expr)
+		}
+		_ => None,
 	}
 }
 
@@ -250,7 +324,8 @@ fn check_stmt(
 			let value_ty = infer_expr(value, symbols, consts, ctx, scratch, sigs);
 			let declared = match ty {
 				Some(explicit) => {
-					unify(&value_ty, &Inferred::Concrete(explicit.clone()), ctx);
+					unify_near(&value_ty, &Inferred::Concrete(explicit.clone()), ctx,
+						expr_line(value), || format!("`let {name}` initializer vs its `: {explicit:?}`"));
 					Inferred::Concrete(explicit.clone())
 				}
 				None => value_ty,
@@ -261,7 +336,8 @@ fn check_stmt(
 
 		Stmt::If { cond, then_branch, else_branch } => {
 			let cond_ty = infer_expr(cond, symbols, consts, ctx, scratch, sigs);
-			unify(&cond_ty, &Inferred::Concrete(Type::Bool), ctx);
+			unify_near(&cond_ty, &Inferred::Concrete(Type::Bool), ctx,
+				expr_line(cond), || "`if` condition".to_string());
 			symbols.push_scope();
 			for s in then_branch { check_stmt(s, symbols, consts, ctx, scratch, let_types, sigs); }
 			symbols.pop_scope();
@@ -274,7 +350,8 @@ fn check_stmt(
 
 		Stmt::While { cond, body } => {
 			let cond_ty = infer_expr(cond, symbols, consts, ctx, scratch, sigs);
-			unify(&cond_ty, &Inferred::Concrete(Type::Bool), ctx);
+			unify_near(&cond_ty, &Inferred::Concrete(Type::Bool), ctx,
+				expr_line(cond), || "`while` condition".to_string());
 			symbols.push_scope();
 			for s in body { check_stmt(s, symbols, consts, ctx, scratch, let_types, sigs); }
 			symbols.pop_scope();
@@ -349,5 +426,61 @@ pub fn check_program(program: &mut Program) {
 				assign_let_types(stmt, &resolved);
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::compiler::lexer::tokenize;
+	use crate::compiler::parser::Parser;
+
+	/// Type-check `src`, returning the panic message if it fails.
+	fn check_err(src: &str) -> Option<String> {
+		let mut prog = Parser::new(tokenize(src)).parse_program();
+		std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::check_program(&mut prog)))
+			.err()
+			.map(|e| {
+				e.downcast_ref::<String>().cloned()
+					.or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+					.unwrap_or_default()
+			})
+	}
+
+	#[test]
+	fn type_errors_carry_a_source_line() {
+		// call argument
+		let msg = check_err(
+			"fn wide(v: i32) -> i32 { return v; }\n\
+			 fn main() {\n\
+			 \tlet a: i16 = 1;\n\
+			 \twide(a);\n\
+			 }",
+		)
+		.expect("should not type-check");
+		assert!(msg.contains("line 4"), "want line 4, got: {msg}");
+		assert!(msg.contains("wide"), "want the callee name, got: {msg}");
+
+		// binary operands
+		let msg = check_err(
+			"fn main() {\n\
+			 \tlet a: i16 = 1;\n\
+			 \tlet b: i32 = 2;\n\
+			 \tlet c = a + b;\n\
+			 }",
+		)
+		.expect("should not type-check");
+		assert!(msg.contains("line 4"), "want line 4, got: {msg}");
+	}
+
+	#[test]
+	fn well_typed_program_checks() {
+		assert!(check_err(
+			"fn main() {\n\
+			 \tlet a: i16 = 3;\n\
+			 \tlet b = a * 2 + 1;\n\
+			 \tstore(0, b);\n\
+			 }"
+		)
+		.is_none());
 	}
 }

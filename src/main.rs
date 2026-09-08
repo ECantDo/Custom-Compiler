@@ -51,7 +51,7 @@ fn main() {
 
 	let mode = if cfg!(debug_assertions) { BuildMode::Dev } else { BuildMode::Release };
 
-	let file_name = "std_lib";
+	let file_name = "mandelbrot";
 
 	let compiled_program = compile_to_asm(&format!("./src/compiler/programs/{file_name}.ecc"), mode).unwrap();
 

@@ -40,16 +40,18 @@ impl Parser {
 		let expr = self.parse_binary(2);
 
 		if self.check(&TokenKind::Eq) {
+			let line = self.peek_line();
 			self.advance();
 			let value = self.parse_expression();
-			return Expr::Assign { target: Box::new(expr), value: Box::new(value) };
+			return Expr::Assign { target: Box::new(expr), value: Box::new(value), line };
 		}
 
 		if let Some(op) = compound_assign_op(self.peek()) {
+			let line = self.peek_line();
 			self.advance();
 			let rhs = self.parse_expression();
-			let value = Expr::Binary { op, left: Box::new(expr.clone()), right: Box::new(rhs) };
-			return Expr::Assign { target: Box::new(expr), value: Box::new(value) };
+			let value = Expr::Binary { op, left: Box::new(expr.clone()), right: Box::new(rhs), line };
+			return Expr::Assign { target: Box::new(expr), value: Box::new(value), line };
 		}
 
 		expr
@@ -94,9 +96,10 @@ impl Parser {
 				Some(info) if info.1 >= min_prec => info,
 				_ => break,
 			};
+			let line = self.peek_line();
 			self.advance();
 			let right = self.parse_binary(prec + 1);
-			left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+			left = Expr::Binary { op, left: Box::new(left), right: Box::new(right), line };
 		}
 
 		left
@@ -150,7 +153,7 @@ impl Parser {
 						}
 					}
 					self.expect(TokenKind::RParen);
-					Expr::Call { name, args }
+					Expr::Call { name, args, line }
 				} else {
 					Expr::Identifier(name)
 				}
@@ -337,6 +340,9 @@ impl Parser {
 fn binop_info(kind: &TokenKind) -> Option<(BinOp, u8)> {
 	use TokenKind::*;
 	Some(match kind {
+		Star => (BinOp::Mul, 10),
+		Slash => (BinOp::Div, 10),
+		Percent => (BinOp::Rem, 10),
 		Plus => (BinOp::Add, 9),
 		Minus => (BinOp::Sub, 9),
 		Shl => (BinOp::Shl, 8),
@@ -370,12 +376,21 @@ fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>, line: usize) -> i6
 				UnOp::Not => !v
 			}
 		}
-		Expr::Binary { op, left, right } => {
+		Expr::Binary { op, left, right, .. } => {
 			let l = eval_const_expr(left, known, line);
 			let r = eval_const_expr(right, known, line);
 			match op {
 				BinOp::Add => l + r,
 				BinOp::Sub => l - r,
+				BinOp::Mul => l * r,
+				BinOp::Div => {
+					if r == 0 { panic!("division by zero in a const expression at line {}", line) }
+					l / r
+				}
+				BinOp::Rem => {
+					if r == 0 { panic!("remainder by zero in a const expression at line {}", line) }
+					l % r
+				}
 				BinOp::BitAnd => l & r,
 				BinOp::BitOr => l | r,
 				BinOp::BitXor => l ^ r,
@@ -384,7 +399,7 @@ fn eval_const_expr(expr: &Expr, known: &HashMap<String, i64>, line: usize) -> i6
 				other => panic!("'{:?}' doesn't produce a number and can't be used in a const expression at line {}", other, line),
 			}
 		}
-		other => panic!("const expressions only support literals, earlier consts, and + - & | ^ << >> — found {:?} at line {}", other, line),
+		other => panic!("const expressions only support literals, earlier consts, and + - * / % & | ^ << >> — found {:?} at line {}", other, line),
 	}
 }
 
@@ -394,6 +409,9 @@ fn compound_assign_op(kind: &TokenKind) -> Option<BinOp> {
 	Some(match kind {
 		PlusEq => BinOp::Add,
 		MinusEq => BinOp::Sub,
+		StarEq => BinOp::Mul,
+		SlashEq => BinOp::Div,
+		PercentEq => BinOp::Rem,
 		AmpEq => BinOp::BitAnd,
 		PipeEq => BinOp::BitOr,
 		CaretEq => BinOp::BitXor,

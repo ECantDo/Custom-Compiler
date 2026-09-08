@@ -1,0 +1,68 @@
+const GRID_WIDTH: i16 = 64;
+const ITERATIONS: i16 = 16;
+const FRAC_BITS: i32 = 16;
+const ONE: i32 = 1 << FRAC_BITS;
+const CENTER: i32 = GRID_WIDTH / 2;
+
+
+fn fx_mul(a: i32, b: i32) -> i32 {
+	return (a * b) >> FRAC_BITS;
+}
+
+fn plane_coord(cell_index: i16) -> i32 {
+	return (((cell_index as i32) - CENTER) * ONE);
+}
+
+fn escape_time(c_re: i32, c_im: i32) -> i16 {
+	let mut z_re: i32 = 0;
+	let mut z_im: i32 = 0;
+	let bailout: i32 = 4 * ONE;
+
+	let mut i: i16 = 0;
+	while i < ITERATIONS {
+		let z_re2 = fx_mul(z_re, z_re);
+		let z_im2 = fx_mul(z_im, z_im);
+		if z_re2 + z_im2 >= bailout {
+			return i;
+		}
+		let next_re = z_re2 - z_im2 + c_re;
+		let next_im = 2 * fx_mul(z_re, z_im) + c_im;
+		z_re = next_re;
+		z_im = next_im;
+		i += 1;
+	}
+	return ITERATIONS;
+}
+
+fn color_for(escape: i16) -> i16 {
+	if escape >= ITERATIONS {
+		return 0;
+	}
+	return 255 * escape / ITERATIONS;
+}
+
+fn main() {
+	let mut gx: i16 = 0;
+	let mut gy: i16 = 0;
+
+	while gx < GRID_WIDTH {
+		let c_re = plane_coord(gx);
+		gy = 0;
+		while gy < (GRID_WIDTH >> 1) { // int div by 2
+			let c_im = plane_coord(gy);
+
+			let et = escape_time(c_re, c_im);
+			let color = color_for(et);
+
+			port_out(0, color);
+			port_out(0, color);
+			port_out(0, color);
+
+			port_out(1, gx | (gy << 8));
+			port_out(1, gx | ((GRID_WIDTH - gy - 1) << 8));
+
+			gy += 1;
+		}
+		gx += 1;
+	}
+}

@@ -27,6 +27,8 @@ impl<'ctx> Graph<'ctx> {
 		for block in function.get_basic_block_iter() {
 			for instr in block.get_instructions() {
 				let Some(def_val) = instruction_def(instr) else { continue; };
+				// Wide (`i32`) results live in RAM slots, not registers - no node.
+				if !is_register_value(def_val) { continue; }
 				let Some(live_out) = liveness.live_out.get(&instr) else { continue; };
 
 				// A value that is defined but interferes with nothing still
@@ -184,7 +186,7 @@ mod tests {
 	fn colors_a_straight_line_function() {
 		let ctx = Context::create();
 		let module = ctx.create_module("t");
-		let i32t = ctx.i32_type();
+		let i32t = ctx.i16_type();
 		let f = module.add_function("f", i32t.fn_type(&[i32t.into(), i32t.into()], false), None);
 		let bb = ctx.append_basic_block(f, "entry");
 		let b = ctx.create_builder();
@@ -209,7 +211,7 @@ mod tests {
 	fn colouring_is_deterministic() {
 		let ctx = Context::create();
 		let module = ctx.create_module("t");
-		let i32t = ctx.i32_type();
+		let i32t = ctx.i16_type();
 		let f = module.add_function("f", i32t.fn_type(&[i32t.into(), i32t.into()], false), None);
 		let bb = ctx.append_basic_block(f, "entry");
 		let b = ctx.create_builder();
@@ -235,7 +237,7 @@ mod tests {
 	fn reports_spills_when_out_of_registers() {
 		let ctx = Context::create();
 		let module = ctx.create_module("t");
-		let i32t = ctx.i32_type();
+		let i32t = ctx.i16_type();
 		let f = module.add_function("f", i32t.fn_type(&[i32t.into(), i32t.into()], false), None);
 		let bb = ctx.append_basic_block(f, "entry");
 		let b = ctx.create_builder();

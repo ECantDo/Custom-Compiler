@@ -106,6 +106,13 @@ impl<'ctx> Codegen<'ctx> {
 		for c in &program.consts {
 			self.consts.insert(c.name.clone(), (c.ty.clone(), c.value));
 		}
+		// A module with a `main` is a program: asmgen has no calling
+		// convention, so every other function must be inlined into `main` and
+		// then dropped. A module without `main` is a library (e.g. the
+		// stdlib) - leave its functions alone so they survive to be emitted.
+		let is_program = program.functions.iter().any(|f| {
+			matches!(f, Stmt::FnDecl { name, .. } if name == "main")
+		});
 		for func in &program.functions {
 			if let Stmt::FnDecl { name, params, return_ty, .. } = func {
 				let param_types: Vec<_> = params.iter()
@@ -117,6 +124,11 @@ impl<'ctx> Codegen<'ctx> {
 				};
 				let function = self.module.add_function(name, fn_type, None);
 				mark_null_pointer_valid(self.context, function);
+				if is_program && name != "main" {
+					let kind = Attribute::get_named_enum_kind_id("alwaysinline");
+					function.add_attribute(AttributeLoc::Function, self.context.create_enum_attribute(kind, 0));
+					function.set_linkage(inkwell::module::Linkage::Internal);
+				}
 
 				let sig_param_types = params.iter().map(|p| p.ty.clone()).collect();
 				self.fn_sigs.insert(name.clone(), (sig_param_types, return_ty.clone()));
@@ -298,7 +310,7 @@ impl<'ctx> Codegen<'ctx> {
 				}
 			}
 
-			Expr::Binary { op, left, right } => {
+			Expr::Binary { op, left, right, .. } => {
 				let (lval, lty) = self.lower_expr(left, hint, scope);
 				let (rval, _) = self.lower_expr(right, Some(&lty), scope);
 				let (l, r) = (lval.into_int_value(), rval.into_int_value());
@@ -307,6 +319,27 @@ impl<'ctx> Codegen<'ctx> {
 				match op {
 					BinOp::Add => (self.builder.build_int_add(l, r, "addtmp").unwrap().into(), lty),
 					BinOp::Sub => (self.builder.build_int_sub(l, r, "subtmp").unwrap().into(), lty),
+					// The target has no multiply/divide unit - asmgen lowers
+					// these to shift/add sequences (constants) or a shift loop
+					// (variables). `-Oz` strength-reduces the constant cases
+					// first, so most of what reaches asmgen is already shifts.
+					BinOp::Mul => (self.builder.build_int_mul(l, r, "multmp").unwrap().into(), lty),
+					BinOp::Div => {
+						let q = if signed {
+							self.builder.build_int_signed_div(l, r, "sdivtmp").unwrap()
+						} else {
+							self.builder.build_int_unsigned_div(l, r, "udivtmp").unwrap()
+						};
+						(q.into(), lty)
+					}
+					BinOp::Rem => {
+						let m = if signed {
+							self.builder.build_int_signed_rem(l, r, "sremtmp").unwrap()
+						} else {
+							self.builder.build_int_unsigned_rem(l, r, "uremtmp").unwrap()
+						};
+						(m.into(), lty)
+					}
 					BinOp::BitAnd => (self.builder.build_and(l, r, "andtmp").unwrap().into(), lty),
 					BinOp::BitOr => (self.builder.build_or(l, r, "ortmp").unwrap().into(), lty),
 					BinOp::BitXor => (self.builder.build_xor(l, r, "xortmp").unwrap().into(), lty),
@@ -331,7 +364,7 @@ impl<'ctx> Codegen<'ctx> {
 				}
 			}
 
-			Expr::Assign { target, value } => {
+			Expr::Assign { target, value, .. } => {
 				match target.as_ref() {
 					Expr::Identifier(name) => {
 						let (ptr, ty) = scope.resolve(name);
@@ -405,7 +438,7 @@ impl<'ctx> Codegen<'ctx> {
 			// want (matches `lod` from the CPU project, but worth double-checking
 			// this compiler is meant to model that at all given it targets the
 			// host's real architecture via LLVM, not your custom ISA).
-			Expr::Call { name, args } if name == "fetch" => {
+			Expr::Call { name, args, .. } if name == "fetch" => {
 				assert_eq!(args.len(), 1, "fetch(addr) takes exactly one argument");
 				let (addr_val, _addr_ty) = self.lower_expr(&args[0], None, scope);
 				self.check_zero_address_allowed(addr_val, scope);
@@ -419,7 +452,7 @@ impl<'ctx> Codegen<'ctx> {
 				(loaded, Type::I16)
 			}
 
-			Expr::Call { name, args } if name == "store" => {
+			Expr::Call { name, args, .. } if name == "store" => {
 				assert_eq!(args.len(), 2, "store(addr, value) takes exactly two arguments");
 				let (addr_val, _addr_ty) = self.lower_expr(&args[0], None, scope);
 				self.check_zero_address_allowed(addr_val, scope);
@@ -437,9 +470,51 @@ impl<'ctx> Codegen<'ctx> {
 				(self.context.i16_type().const_int(0, false).into(), Type::I16)
 			}
 
+			// `port_out(port, value)` / `port_in(port)` - the IO-port intrinsics.
+			// Like `fetch`/`store` they can't be written in the language: they
+			// lower straight to the custom ISA's `out` / `in` instructions
+			// (opcode 8), which asmgen picks out by callee name. `port` has to
+			// be a compile-time constant - it encodes as a 4-bit immediate.
+			//
+			// The declarations are left attribute-free on purpose: LLVM then
+			// treats every call as a full memory barrier, so `Oz` won't drop,
+			// merge, hoist or reorder them - exactly the semantics MMIO wants.
+			Expr::Call { name, args, .. } if name == "port_out" => {
+				assert_eq!(args.len(), 2, "port_out(port, value) takes exactly two arguments");
+				let port = self.lower_const_port(&args[0], scope);
+				let (value_val, _) = self.lower_expr(&args[1], Some(&Type::I16), scope);
+
+				let i16_ty = self.context.i16_type();
+				let fn_ty = self.context.void_type().fn_type(&[i16_ty.into(), i16_ty.into()], false);
+				let callee = self.module.get_function(IO_OUT_FN)
+					.unwrap_or_else(|| self.module.add_function(IO_OUT_FN, fn_ty, None));
+
+				self.builder
+					.build_call(callee, &[i16_ty.const_int(port as u64, true).into(), value_val.into()], "")
+					.unwrap();
+
+				(i16_ty.const_int(0, false).into(), Type::I16)
+			}
+
+			Expr::Call { name, args, .. } if name == "port_in" => {
+				assert_eq!(args.len(), 1, "port_in(port) takes exactly one argument");
+				let port = self.lower_const_port(&args[0], scope);
+
+				let i16_ty = self.context.i16_type();
+				let fn_ty = i16_ty.fn_type(&[i16_ty.into()], false);
+				let callee = self.module.get_function(IO_IN_FN)
+					.unwrap_or_else(|| self.module.add_function(IO_IN_FN, fn_ty, None));
+
+				let call = self.builder
+					.build_call(callee, &[i16_ty.const_int(port as u64, true).into()], "inval")
+					.unwrap();
+
+				(call.try_as_basic_value().unwrap_basic(), Type::I16)
+			}
+
 			// General function calls - this is the path malloc/free will go
 			// through once you write them as real `fn`s in your language.
-			Expr::Call { name, args } => {
+			Expr::Call { name, args, .. } => {
 				let function = self.module.get_function(name)
 					.unwrap_or_else(|| panic!("undefined function '{name}'"));
 				let (param_tys, return_ty) = self.fn_sigs.get(name)
@@ -458,9 +533,11 @@ impl<'ctx> Codegen<'ctx> {
 						//.expect("function has a declared return type but produced no value");
 						(val, ret_ty)
 					}
-					None => panic!(
-						"'{name}' returns void - calling it as a value-producing expression isn't supported yet (call it as a statement instead)"
-					),
+					// Void call. Fine in statement position (`draw_pixel(x, y);`);
+					// hand back the same dummy `I16(0)` `store` uses so a stray
+					// value-position use types as I16 rather than crashing here -
+					// matching the "void isn't really modelled" gap in typecheck.
+					None => (self.context.i16_type().const_int(0, false).into(), Type::I16),
 				}
 			}
 
@@ -515,7 +592,28 @@ impl<'ctx> Codegen<'ctx> {
 
 		self.builder.position_at_end(cont_bb);
 	}
+
+	/// Lower a `port_in`/`port_out` port argument. The port becomes a 4-bit
+	/// immediate in the emitted instruction, so it has to fold to a
+	/// compile-time constant in `0..=15` (an integer literal, or a `const`).
+	fn lower_const_port(&mut self, expr: &Expr, scope: &mut FnScope<'ctx>) -> i64 {
+		let (val, _ty) = self.lower_expr(expr, Some(&Type::I16), scope);
+		let port = val
+			.into_int_value()
+			.get_sign_extended_constant()
+			.unwrap_or_else(|| panic!("IO port must be a compile-time constant (an integer literal or a `const`)"));
+		assert!(
+			(0..=15).contains(&port),
+			"IO port {port} is out of range - the hardware only has ports 0..=15",
+		);
+		port
+	}
 }
+
+/// Module-level names of the IO-port intrinsic declarations. asmgen keys off
+/// these when selecting the `out` / `in` instructions.
+pub const IO_OUT_FN: &str = "__io_out";
+pub const IO_IN_FN: &str = "__io_in";
 
 /// Recursively finds every `let` in a statement list, including inside
 /// if/while bodies, so they can all be pre-allocated in the entry block.

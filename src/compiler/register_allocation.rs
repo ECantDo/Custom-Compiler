@@ -70,9 +70,14 @@ fn instruction_def<'ctx>(instr: InstructionValue<'ctx>) -> Option<BasicValueEnum
 /// instruction result, as opposed to a constant (rematerialised at each
 /// use) or a function parameter (lives in its argument register). Only
 /// these appear as nodes in the interference graph.
+///
+/// `i32`/`u32` values are excluded: the backend keeps those in a pair of RAM
+/// scratch slots, not registers, so the allocator never sees them (see
+/// `mod i32bit` in `asmgen`). Other widths (`i64`, only ever LLVM's own
+/// pointer-index math) keep getting a register as before.
 pub fn is_register_value(value: BasicValueEnum) -> bool {
 	match value {
-		BasicValueEnum::IntValue(v) => v.as_instruction().is_some(),
+		BasicValueEnum::IntValue(v) => v.as_instruction().is_some() && v.get_type().get_bit_width() != 32,
 		BasicValueEnum::PointerValue(v) => v.as_instruction().is_some(),
 		BasicValueEnum::FloatValue(v) => v.as_instruction().is_some(),
 		// Aggregates/vectors never reach the allocator on this scalar target.

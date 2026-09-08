@@ -21,7 +21,7 @@ pub enum Type {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
-	Add, Sub,
+	Add, Sub, Mul, Div, Rem,
 	BitAnd, BitOr, BitXor, Shl, Shr,
 	Eq, NotEq, Lt, Gt, LtEq, GtEq,
 	And, Or, // && ||
@@ -39,10 +39,10 @@ pub enum Expr {
 	IntLiteral(i64),
 	BoolLiteral(bool),
 	Identifier(String),
-	Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+	Binary { op: BinOp, left: Box<Expr>, right: Box<Expr>, line: usize },
 	Unary { op: UnOp, expr: Box<Expr> },
-	Assign { target: Box<Expr>, value: Box<Expr> },
-	Call { name: String, args: Vec<Expr> },
+	Assign { target: Box<Expr>, value: Box<Expr>, line: usize },
+	Call { name: String, args: Vec<Expr>, line: usize },
 	Deref(Box<Expr>),                     // *p
 	AddrOf(Box<Expr>),                    // &x
 	Cast { expr: Box<Expr>, ty: Type },   // x as i32

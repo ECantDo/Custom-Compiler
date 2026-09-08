@@ -63,23 +63,10 @@ pub fn start_cpu_from_program(program: &[u32]) {
 	cpu_cycle(&mut parts);
 }
 
-fn cpu_cycle(cpu_parts: &mut CpuParts) {
-	println!("Program Started");
-	let mut running = true;
-	let mut step: usize = 0;
-
-	while running {
-		// let cycle_start = Instant::now();
-		let instruction: Instruction = cpu_parts.program_memory.fetch(cpu_parts.program_counter.get());
-		cpu_parts.program_counter.increment();
-
-		let info: InstructionInfo = parse_instruction(instruction);
-
-		if info.opcode == 0 {
-			running = false;
-			continue;
-		}
-
+/// Execute one already-decoded instruction (everything except fetch, the
+/// `hlt` check, and any per-cycle bookkeeping). Shared by the interactive
+/// loop and [`run_headless`].
+fn execute(cpu_parts: &mut CpuParts, info: &InstructionInfo) {
 		match info.opcode & !UPPER_OP_MASK {
 			1 | 2 | 3 => {
 				// ALU, shifter, ADDF
@@ -148,6 +135,26 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 				panic!("Unknown function -> {}", info.opcode);
 			}
 		}
+}
+
+fn cpu_cycle(cpu_parts: &mut CpuParts) {
+	println!("Program Started");
+	let mut running = true;
+	let mut step: usize = 0;
+
+	while running {
+		let instruction: Instruction = cpu_parts.program_memory.fetch(cpu_parts.program_counter.get());
+		cpu_parts.program_counter.increment();
+
+		let info: InstructionInfo = parse_instruction(instruction);
+
+		if info.opcode == 0 {
+			running = false;
+			continue;
+		}
+
+		execute(cpu_parts, &info);
+
 		print!("{:4} : {} : S{}\r", cpu_parts.program_counter.get(), cpu_parts.registers, step);
 		io::stdout().flush().unwrap();
 		step += 1;
@@ -156,6 +163,32 @@ fn cpu_cycle(cpu_parts: &mut CpuParts) {
 		thread::sleep(Duration::try_from(sleep_time).unwrap());
 	}
 	println!("\n{}", cpu_parts.program_ram)
+}
+
+/// Run `program` with no IO devices, no delay, and no terminal output,
+/// until `hlt` or `max_steps` instructions - then return a snapshot of RAM
+/// indexed by address. Intended for tests and scripted runs.
+pub fn run_headless(program: &[u32], max_steps: usize) -> Vec<Word> {
+	let mut parts = CpuParts {
+		cpu_flags: CpuFlags::default(),
+		program_counter: ProgramCounter::default(),
+		program_memory: ProgramMemory::from_program(program),
+		program_ram: ProgramRam::default(),
+		io_ports: IoPorts::empty(),
+		registers: Registers::default(),
+	};
+
+	for _ in 0..max_steps {
+		let instruction = parts.program_memory.fetch(parts.program_counter.get());
+		parts.program_counter.increment();
+		let info = parse_instruction(instruction);
+		if info.opcode == 0 {
+			break;
+		}
+		execute(&mut parts, &info);
+	}
+
+	(0..RAM_SIZE as UnsignedWord).map(|a| parts.program_ram.get(a)).collect()
 }
 
 fn branch_taken(condition: u8, flags: &CpuFlags) -> bool {
