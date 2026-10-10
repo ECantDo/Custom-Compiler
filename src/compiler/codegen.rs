@@ -102,6 +102,22 @@ impl<'ctx> Codegen<'ctx> {
 		matches!(ty, Type::I16 | Type::I32)
 	}
 
+	/// Truncate a wider integer down to a machine word. `store` / `port_out`
+	/// take a `Word`, so a 32-bit argument must be narrowed here rather than
+	/// emitting a two-word `store i32` (which also blocks `-Oz` from
+	/// narrowing the value in the first place).
+	fn narrow_to_word(&self, val: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+		if let BasicValueEnum::IntValue(iv) = val {
+			if iv.get_type().get_bit_width() > 16 {
+				return self.builder
+					.build_int_truncate(iv, self.context.i16_type(), "narrowtmp")
+					.unwrap()
+					.into();
+			}
+		}
+		val
+	}
+
 	pub fn lower_program(&mut self, program: &Program) {
 		for c in &program.consts {
 			self.consts.insert(c.name.clone(), (c.ty.clone(), c.value));
@@ -458,6 +474,7 @@ impl<'ctx> Codegen<'ctx> {
 				self.check_zero_address_allowed(addr_val, scope);
 
 				let (value_val, _) = self.lower_expr(&args[1], Some(&Type::I16), scope);
+				let value_val = self.narrow_to_word(value_val);
 
 				let ptr_ty = self.context.ptr_type(AddressSpace::default());
 				let ptr = self.builder
@@ -483,6 +500,7 @@ impl<'ctx> Codegen<'ctx> {
 				assert_eq!(args.len(), 2, "port_out(port, value) takes exactly two arguments");
 				let port = self.lower_const_port(&args[0], scope);
 				let (value_val, _) = self.lower_expr(&args[1], Some(&Type::I16), scope);
+				let value_val = self.narrow_to_word(value_val);
 
 				let i16_ty = self.context.i16_type();
 				let fn_ty = self.context.void_type().fn_type(&[i16_ty.into(), i16_ty.into()], false);

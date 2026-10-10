@@ -782,27 +782,46 @@ mod i32bit {
 		regs: &mut RegAlloc<'ctx>,
 	) -> String {
 		let mut out = String::new();
-		if pairs.is_empty() {
-			return out;
-		}
-		assert!(
-			pairs.len() * 2 <= (SLOT_FLOOR - WORK) as usize,
-			"more simultaneous 32-bit phi copies on one edge than the staging area holds"
-		);
-		for (j, (_dst, src)) in pairs.iter().enumerate() {
-			let s = wide_src(*src, regs);
-			let stage = WORK + (j as u16) * 2;
-			load_word(&mut out, "t4", &s, 0);
-			store_word(&mut out, "t4", stage, 0);
-			load_word(&mut out, "t4", &s, 1);
-			store_word(&mut out, "t4", stage, 1);
-		}
-		for (j, (dst, _src)) in pairs.iter().enumerate() {
-			let stage = WORK + (j as u16) * 2;
-			out.push_str(&format!("\tlod\tt4 {}(zero)\n", stage));
-			store_word(&mut out, "t4", *dst, 0);
-			out.push_str(&format!("\tlod\tt4 {}(zero)\n", stage + 1));
-			store_word(&mut out, "t4", *dst, 1);
+
+		// A copy whose source is another pending copy's *destination slot*
+		// must run first. Emit the free ones repeatedly; when only a cycle is
+		// left, stage one destination through the WORK block and retry.
+		let mut pending: Vec<(u16, Wide)> = pairs
+			.iter()
+			.map(|(dst, src)| (*dst, wide_src(*src, regs)))
+			.filter(|(dst, src)| !matches!(src, Wide::Slot(s) if s == dst)) // already in place
+			.collect();
+
+		let copy = |out: &mut String, dst: u16, src: &Wide| {
+			load_word(out, "t4", src, 0);
+			store_word(out, "t4", dst, 0);
+			load_word(out, "t4", src, 1);
+			store_word(out, "t4", dst, 1);
+		};
+
+		while !pending.is_empty() {
+			let src_slots: std::collections::HashSet<u16> = pending
+				.iter()
+				.filter_map(|(_, s)| match s {
+					Wide::Slot(a) => Some(*a),
+					_ => None,
+				})
+				.collect();
+
+			if let Some(pos) = pending.iter().position(|(dst, _)| !src_slots.contains(dst)) {
+				let (dst, src) = pending.remove(pos);
+				copy(&mut out, dst, &src);
+				continue;
+			}
+
+			// Everything left is a cycle: park one dst in WORK, redirect readers.
+			let victim = pending[0].0;
+			copy(&mut out, WORK, &Wide::Slot(victim));
+			for (_, s) in pending.iter_mut() {
+				if matches!(s, Wide::Slot(a) if *a == victim) {
+					*s = Wide::Slot(WORK);
+				}
+			}
 		}
 		out
 	}
